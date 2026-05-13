@@ -7,3 +7,4 @@ dataset.zip
 *.pt
 *.safetensors
 sd-scripts/
+*:Zone.Identifier
