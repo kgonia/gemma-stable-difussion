@@ -97,6 +97,14 @@ def main():
         "SEMANTIC_DIAGNOSTIC_BRANCH": r'elif\s+CONDITIONING_ARCH\s*==\s*"gemma_clip_semantic_adapter".*compute_semantic_adapter_prompt_sensitivity',
         "SEMANTIC_DELTA_ALIGNMENT_BRANCH": r'elif\s+CONDITIONING_ARCH\s*==\s*"gemma_clip_semantic_adapter"\s+and\s+semantic_adapter\s+is\s+not\s+None.*student_context\s*=\s*semantic_adapter',
         "SEMANTIC_OVERFIT_FIXED_LOSS_BRANCH": r'elif\s+CONDITIONING_ARCH\s*==\s*"gemma_clip_semantic_adapter".*context\s*=\s*semantic_adapter.*pred\s*=\s*unet\(noisy,\s*t,\s*encoder_hidden_states=context\)',
+        "OVERFIT_PRETRAIN_GATE_AFTER_DATASET": r'=== Exact-overfit pre-training gate ===.*save_overfit_reference_grid\(\).*compute_fixed_overfit_eval_loss\(label="pretrain_overfit"\)',
+        "NO_OVERFIT_GATE_IN_CELL_33_TEXT": r'Overfit reference/fixed-loss gates run at the start of Phase A',
+        "SEMANTIC_POSTTRAIN_DELTA": r'=== Post-training semantic adapter diagnostics ===.*compute_teacher_student_delta_alignment\(DIAGNOSTIC_PROMPTS\[0\],\s*label="post_semantic"\)',
+        "SEMANTIC_VALIDATION_DELTA": r'compute_teacher_student_delta_alignment\(VAL_PROMPTS\[0\],\s*label="validation_semantic"\)',
+        "SEMANTIC_EXACT_OVERFIT_COMPARISON_GRID": r'validation_overfit_semantic_vs_clip_comparison\.png',
+        "SEMANTIC_GENERIC_COMPARISON_GRID": r'validation_semantic_vs_clip_comparison\.png',
+        "SEMANTIC_RELOADED_PROOF_GRID": r'samples_reloaded_semantic_adapter\.png',
+        "SEMANTIC_CHECKPOINT_SELFTEST": r'Semantic adapter checkpoint self-test strict-reload: PASS',
     }
     for name, pattern in required.items():
         check(results, name, re.search(pattern, full, flags=re.S) is not None)
