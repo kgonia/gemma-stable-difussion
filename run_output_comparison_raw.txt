@@ -1,0 +1,315 @@
+===== overfit: gemma3_sd_colab (overfit).ipynb =====
+--- cell 7 exec=5 # @title 1.4 Run Configuration + wandb via Colab Secrets ---
+CONDITIONING_ARCH = gemma_clip_semantic_adapter
+  run_mode: overfit_train
+  conditioning_arch: gemma_clip_semantic_adapter
+  fullrank_epochs: 40
+  max_samples_warmup: 64
+  max_samples_phaseb: 64
+  fullrank_lr: 1e-05
+  phase_a_max_opt_steps: 300
+  phase_b_max_opt_steps: 0
+  phase_a_trainables: semantic_adapter_only
+  semantic_max_opt_steps: 500
+--- cell 8 exec=6 # @title 2.1 Load Gemma 3 270M ---
+  Gemma layer index for conditioning: -1
+--- cell 10 exec=7 # @title 2.2 Load CLIP Persistently (training scaffold / teacher) ---
+  CLIP frozen. It is a teacher/scaffold only; final inference uses the pruned Gemma-only checkpoint.
+--- cell 14 exec=8 # @title 3.1 Load StyleJourney SD UNet + VAE + Scheduler from Colab safetensors ---
+Loading Stable Diffusion checkpoint from: /content/drive/MyDrive/model/stylejourney_v10.safetensors
+Some weights of the model checkpoint were not used when initializing CLIPTextModel: 
+--- cell 15 exec=9 # @title 3.2 UNet Surgery: Add Dual Native Gemma Cross-Attention ---
+CONDITIONING_ARCH = "ella_gemma_connector": skipping DualNativeAttention surgery.
+--- cell 16 exec=10 # @title 3.2b ELLA-Style Gemma Timestep Semantic Connector ---
+Skipping GemmaTimestepSemanticConnector (CONDITIONING_ARCH != ella_gemma_connector)
+--- cell 18 exec=12 # @title 3.3 Verify Dual Forward + Mandatory Pre-Training Diagnostics ---
+Skipping Gemma layer 20: out of range for 19 hidden_states entries
+Gemma layer   4: mean pairwise cos=0.9827, token_var=0.1499
+Gemma layer   8: mean pairwise cos=0.9965, token_var=0.0308
+Gemma layer  12: mean pairwise cos=0.9908, token_var=0.0276
+Gemma layer  16: mean pairwise cos=0.9637, token_var=0.0759
+Gemma layer  18: mean pairwise cos=0.6935, token_var=0.1755
+Teacher text-delta norm=0.022837, relative=0.024562 for prompt: a red sports car on a city street
+[pretrain] student/teacher delta cosine = -0.026068
+[pretrain] student delta norm = 7.5560, teacher delta norm = 3.4621
+[pretrain] delta norm ratio = 2.1825
+--- cell 21 exec=13 # @title 4.0 Streaming IterableDataset + Shuffled DataLoader Helper + Shuffled DataLoader Helper ---
+DataLoader phase=0 epoch=0 max_samples=8 shuffle=False seed=1234
+DataLoader phase=1 epoch=0 max_samples=4 shuffle=False seed=2234
+--- cell 23 exec=14 # @title 4.1 Phase A: Full-Rank / Connector / Semantic Adapter Training: Full-Rank Gemma Branch Warmup + Text-Delta Dist ---
+DataLoader phase=1 epoch=0 max_samples=64 shuffle=False seed=2234
+DataLoader phase=1 epoch=1 max_samples=64 shuffle=False seed=2235
+semantic step 50: total=1.48253 mse=1.12993 cos=0.55574 norm=0.03515 ctr=0.32973 pooled_cos=0.67757 retrieval=1.000 collapse(pred/clip)=0.882/0.398 norm_ratio=1.522
+DataLoader phase=1 epoch=2 max_samples=64 shuffle=False seed=2236
+DataLoader phase=1 epoch=3 max_samples=64 shuffle=False seed=2237
+semantic step 100: total=1.15547 mse=0.90650 cos=0.44603 norm=0.04321 ctr=0.07580 pooled_cos=0.82477 retrieval=1.000 collapse(pred/clip)=0.739/0.653 norm_ratio=1.515
+DataLoader phase=1 epoch=4 max_samples=64 shuffle=False seed=2238
+semantic step 150: total=1.10171 mse=0.87443 cos=0.42977 norm=0.04387 ctr=0.00715 pooled_cos=0.82885 retrieval=1.000 collapse(pred/clip)=0.607/0.448 norm_ratio=1.511
+DataLoader phase=1 epoch=5 max_samples=64 shuffle=False seed=2239
+DataLoader phase=1 epoch=6 max_samples=64 shuffle=False seed=2240
+semantic step 200: total=1.09905 mse=0.87432 cos=0.42970 norm=0.03263 ctr=0.00864 pooled_cos=0.84494 retrieval=1.000 collapse(pred/clip)=0.701/0.398 norm_ratio=1.525
+DataLoader phase=1 epoch=7 max_samples=64 shuffle=False seed=2241
+semantic step 250: total=0.99808 mse=0.79342 cos=0.39047 norm=0.03609 ctr=0.00200 pooled_cos=0.85074 retrieval=1.000 collapse(pred/clip)=0.513/0.336 norm_ratio=1.459
+DataLoader phase=1 epoch=8 max_samples=64 shuffle=False seed=2242
+DataLoader phase=1 epoch=9 max_samples=64 shuffle=False seed=2243
+semantic step 300: total=0.99433 mse=0.78438 cos=0.38613 norm=0.06612 ctr=0.00180 pooled_cos=0.92625 retrieval=1.000 collapse(pred/clip)=0.493/0.482 norm_ratio=1.487
+Phase A semantic adapter complete: steps=300, best_loss=0.8258715867996216
+[post_semantic] student/teacher delta cosine = 0.158492
+[post_semantic] student delta norm = 18.6669, teacher delta norm = 2.1311
+[post_semantic] delta norm ratio = 8.7594
+Semantic-adapter post-train sensitivity: 0.051816
+[post_phase_a_overfit] fixed overfit noise-pred MSE @ t=500: 0.071087
+--- cell 24 exec=15 # @title 4.2 Manual LoRA for Dual Native Attention Branches for Dual Native Attention Branches ---
+Skipping LoRA wrapping because RUN_MODE=overfit_train
+--- cell 26 exec=16 # @title 4.4 Phase B: Gemma-Only Continuation + Text-Delta Teacher Decay ---
+Phase B complete. Next: validation grids, checkpoints, and reloaded-pruned final proof.
+--- cell 28 exec=17 # @title 5.1 Fixed Validation Grids + Prompt Sensitivity Diagnostics ---
+Output hidden; open in https://colab.research.google.com to view.
+--- cell 30 exec=19 # @title 5.2 Save Dual + Pruned Gemma-Only Checkpoints ---
+Semantic adapter checkpoint saved: /content/drive/MyDrive/gemma3-sd/gemma_semantic_adapter_phase1.pt
+Semantic adapter checkpoint self-test strict-reload: PASS
+--- cell 31 exec=20 # @title 5.3 Final Proof from Freshly Reloaded Pruned Checkpoint ---
+Semantic adapter reload proof: PASS (strict=True)
+Reloaded semantic adapter finite UNet forward: PASS
+Generating reloaded semantic adapter: a cat sitting on a windowsill looking outside
+Proof reloaded semantic:  17%|█▋        | 5/30 [00:01<00:05,  4.21it/s]
+OutOfMemoryError: CUDA out of memory. Tried to allocate 10.00 MiB. GPU 0 has a total capacity of 22.03 GiB of which 3.12 MiB is free. Including non-PyTorch memory, this process has 22.02 GiB memory in use. Of the allocated memory 21.72 GiB is allocated by PyTorch, and 56.39 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+OutOfMemoryError                          Traceback (most recent call last)
+OutOfMemoryError: CUDA out of memory. Tried to allocate 10.00 MiB. GPU 0 has a total capacity of 22.03 GiB of which 3.12 MiB is free. Including non-PyTorch memory, this process has 22.02 GiB memory in use. Of the allocated memory 21.72 GiB is allocated by PyTorch, and 56.39 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+===== diagnostic: gemma3_sd_colab (diagnostic).ipynb =====
+--- cell 7 exec=32 # @title 1.4 Run Configuration + wandb via Colab Secrets ---
+CONDITIONING_ARCH = gemma_clip_semantic_adapter
+<br>    <style><br>        .wandb-row {<br>            display: flex;<br>            flex-direction: row;<br>            flex-wrap: wrap;<br>            justify-content: flex-start;<br>            width: 100%;<br>        }<br>        .wandb-col {<br>            display: flex;<br>            flex-direction: column;<br>            flex-basis: 100%;<br>            flex: 1;<br>            padding: 10px;<br>        }<br>    </style><br><div class="wandb-row"><div class="wandb-col"><h3>Run history:</h3><br/><table class="wandb"><tr><td>data/phase_0_epoch_0_max_samples</td><td>▁</td></tr><tr><td>data/phase_0_epoch_0_shuffle_seed</td><td>▁</td></tr><tr><td>data/phase_1_epoch_0_max_samples</td><td>▁< ...
+  run_mode: diagnostic
+  conditioning_arch: gemma_clip_semantic_adapter
+  fullrank_epochs: 0
+  max_samples_warmup: 128
+  max_samples_phaseb: 128
+  fullrank_lr: 1e-05
+  phase_a_max_opt_steps: 0
+  phase_b_max_opt_steps: 0
+  phase_a_trainables: semantic_adapter_only
+  semantic_max_opt_steps: 500
+--- cell 8 exec=33 # @title 2.1 Load Gemma 3 270M ---
+  Gemma layer index for conditioning: -1
+--- cell 10 exec=34 # @title 2.2 Load CLIP Persistently (training scaffold / teacher) ---
+  CLIP frozen. It is a teacher/scaffold only; final inference uses the pruned Gemma-only checkpoint.
+--- cell 14 exec=35 # @title 3.1 Load StyleJourney SD UNet + VAE + Scheduler from Colab safetensors ---
+Loading Stable Diffusion checkpoint from: /content/drive/MyDrive/model/stylejourney_v10.safetensors
+Some weights of the model checkpoint were not used when initializing CLIPTextModel: 
+--- cell 15 exec=36 # @title 3.2 UNet Surgery: Add Dual Native Gemma Cross-Attention ---
+CONDITIONING_ARCH = "ella_gemma_connector": skipping DualNativeAttention surgery.
+--- cell 16 exec=37 # @title 3.2b ELLA-Style Gemma Timestep Semantic Connector ---
+Skipping GemmaTimestepSemanticConnector (CONDITIONING_ARCH != ella_gemma_connector)
+--- cell 18 exec=39 # @title 3.3 Verify Dual Forward + Mandatory Pre-Training Diagnostics ---
+Skipping Gemma layer 20: out of range for 19 hidden_states entries
+Gemma layer   4: mean pairwise cos=0.9827, token_var=0.1499
+Gemma layer   8: mean pairwise cos=0.9965, token_var=0.0308
+Gemma layer  12: mean pairwise cos=0.9908, token_var=0.0276
+Gemma layer  16: mean pairwise cos=0.9637, token_var=0.0759
+Gemma layer  18: mean pairwise cos=0.6935, token_var=0.1755
+Teacher text-delta norm=0.022837, relative=0.024562 for prompt: a red sports car on a city street
+[pretrain] student/teacher delta cosine = -0.134806
+[pretrain] student delta norm = 12.7588, teacher delta norm = 3.1481
+[pretrain] delta norm ratio = 4.0528
+--- cell 21 exec=40 # @title 4.0 Streaming IterableDataset + Shuffled DataLoader Helper + Shuffled DataLoader Helper ---
+DataLoader phase=0 epoch=0 max_samples=8 shuffle=True seed=1234
+--- cell 23 exec=41 # @title 4.1 Phase A: Full-Rank / Connector / Semantic Adapter Training: Full-Rank Gemma Branch Warmup + Text-Delta Dist ---
+Skipping Phase A full-rank warmup because RUN_MODE=diagnostic
+--- cell 24 exec=42 # @title 4.2 Manual LoRA for Dual Native Attention Branches for Dual Native Attention Branches ---
+Skipping LoRA wrapping because RUN_MODE=diagnostic
+--- cell 26 exec=43 # @title 4.4 Phase B: Gemma-Only Continuation + Text-Delta Teacher Decay ---
+Phase B complete. Next: validation grids, checkpoints, and reloaded-pruned final proof.
+--- cell 28 exec=44 # @title 5.1 Fixed Validation Grids + Prompt Sensitivity Diagnostics ---
+Generating CLIP teacher baseline: a cat sitting on a windowsill looking outside
+Generating CLIP teacher: 100%|██████████| 30/30 [00:05<00:00,  5.64it/s]
+Generating CLIP teacher baseline: a watercolor painting of a mountain lake
+Generating CLIP teacher: 100%|██████████| 30/30 [00:05<00:00,  5.61it/s]
+Generating CLIP teacher baseline: a neon-lit cyberpunk alleyway at night
+Generating CLIP teacher: 100%|██████████| 30/30 [00:05<00:00,  5.59it/s]
+--- cell 30 exec=46 # @title 5.2 Save Dual + Pruned Gemma-Only Checkpoints ---
+Skipping checkpoint save/prune because RUN_MODE=diagnostic. Diagnostic mode should not write final artifacts from an untrained scaffold.
+--- cell 31 exec=47 # @title 5.3 Final Proof from Freshly Reloaded Pruned Checkpoint ---
+Semantic adapter reload proof: PASS (strict=True)
+Reloaded semantic adapter finite UNet forward: PASS
+===== short_train: gemma3_sd_colab (short_train).ipynb =====
+--- cell 7 exec=5 # @title 1.4 Run Configuration + wandb via Colab Secrets ---
+CONDITIONING_ARCH = gemma_clip_semantic_adapter
+  run_mode: short_train
+  conditioning_arch: gemma_clip_semantic_adapter
+  fullrank_epochs: 1
+  max_samples_warmup: 6000
+  max_samples_phaseb: 6000
+  fullrank_lr: 1e-05
+  phase_a_max_opt_steps: 100
+  phase_b_max_opt_steps: 200
+  phase_a_trainables: semantic_adapter_only
+  semantic_max_opt_steps: 500
+--- cell 8 exec=6 # @title 2.1 Load Gemma 3 270M ---
+  Gemma layer index for conditioning: -1
+--- cell 10 exec=7 # @title 2.2 Load CLIP Persistently (training scaffold / teacher) ---
+  CLIP frozen. It is a teacher/scaffold only; final inference uses the pruned Gemma-only checkpoint.
+--- cell 14 exec=8 # @title 3.1 Load StyleJourney SD UNet + VAE + Scheduler from Colab safetensors ---
+Loading Stable Diffusion checkpoint from: /content/drive/MyDrive/model/stylejourney_v10.safetensors
+Some weights of the model checkpoint were not used when initializing CLIPTextModel: 
+--- cell 15 exec=9 # @title 3.2 UNet Surgery: Add Dual Native Gemma Cross-Attention ---
+CONDITIONING_ARCH = "ella_gemma_connector": skipping DualNativeAttention surgery.
+--- cell 16 exec=10 # @title 3.2b ELLA-Style Gemma Timestep Semantic Connector ---
+Skipping GemmaTimestepSemanticConnector (CONDITIONING_ARCH != ella_gemma_connector)
+--- cell 18 exec=12 # @title 3.3 Verify Dual Forward + Mandatory Pre-Training Diagnostics ---
+Skipping Gemma layer 20: out of range for 19 hidden_states entries
+Gemma layer   4: mean pairwise cos=0.9827, token_var=0.1499
+Gemma layer   8: mean pairwise cos=0.9965, token_var=0.0311
+Gemma layer  12: mean pairwise cos=0.9908, token_var=0.0280
+Gemma layer  16: mean pairwise cos=0.9637, token_var=0.0761
+Gemma layer  18: mean pairwise cos=0.6932, token_var=0.1768
+Teacher text-delta norm=0.022845, relative=0.024572 for prompt: a red sports car on a city street
+[pretrain] student/teacher delta cosine = -0.114370
+[pretrain] student delta norm = 11.3624, teacher delta norm = 3.2071
+[pretrain] delta norm ratio = 3.5429
+--- cell 21 exec=13 # @title 4.0 Streaming IterableDataset + Shuffled DataLoader Helper + Shuffled DataLoader Helper ---
+DataLoader phase=0 epoch=0 max_samples=8 shuffle=True seed=1234
+--- cell 23 exec=14 # @title 4.1 Phase A: Full-Rank / Connector / Semantic Adapter Training: Full-Rank Gemma Branch Warmup + Text-Delta Dist ---
+DataLoader phase=1 epoch=0 max_samples=6000 shuffle=True seed=2234
+semantic step 50: total=1.64861 mse=1.19851 cos=0.58909 norm=0.06544 ctr=0.69598 pooled_cos=0.61010 retrieval=0.500 collapse(pred/clip)=0.803/0.341 norm_ratio=1.574
+semantic step 100: total=1.45649 mse=1.04943 cos=0.51629 norm=0.06851 ctr=0.65893 pooled_cos=0.69842 retrieval=0.750 collapse(pred/clip)=0.782/0.470 norm_ratio=1.528
+Phase A semantic adapter complete: steps=100, best_loss=1.4127966165542603
+[post_semantic] student/teacher delta cosine = 0.310035
+[post_semantic] student delta norm = 27.2755, teacher delta norm = 3.8207
+[post_semantic] delta norm ratio = 7.1389
+Semantic-adapter post-train sensitivity: 0.074582
+--- cell 26 exec=16 # @title 4.4 Phase B: Gemma-Only Continuation + Text-Delta Teacher Decay ---
+Phase B complete. Next: validation grids, checkpoints, and reloaded-pruned final proof.
+--- cell 28 exec=17 # @title 5.1 Fixed Validation Grids + Prompt Sensitivity Diagnostics ---
+Output hidden; open in https://colab.research.google.com to view.
+--- cell 30 exec=19 # @title 5.2 Save Dual + Pruned Gemma-Only Checkpoints ---
+Semantic adapter checkpoint saved: /content/drive/MyDrive/gemma3-sd/gemma_semantic_adapter_phase1.pt
+Semantic adapter checkpoint self-test strict-reload: PASS
+--- cell 31 exec=20 # @title 5.3 Final Proof from Freshly Reloaded Pruned Checkpoint ---
+Semantic adapter reload proof: PASS (strict=True)
+Reloaded semantic adapter finite UNet forward: PASS
+Generating reloaded semantic adapter: a cat sitting on a windowsill looking outside
+Proof reloaded semantic:  37%|███▋      | 11/30 [00:00<00:01, 11.34it/s]
+OutOfMemoryError: CUDA out of memory. Tried to allocate 30.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 19.44 MiB is free. Including non-PyTorch memory, this process has 39.46 GiB memory in use. Of the allocated memory 38.87 GiB is allocated by PyTorch, and 78.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+OutOfMemoryError                          Traceback (most recent call last)
+OutOfMemoryError: CUDA out of memory. Tried to allocate 30.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 19.44 MiB is free. Including non-PyTorch memory, this process has 39.46 GiB memory in use. Of the allocated memory 38.87 GiB is allocated by PyTorch, and 78.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+===== full_train: gemma3_sd_colab (full_train).ipynb =====
+--- cell 7 exec=5 # @title 1.4 Run Configuration + wandb via Colab Secrets ---
+CONDITIONING_ARCH = gemma_clip_semantic_adapter
+  run_mode: full_train
+  conditioning_arch: gemma_clip_semantic_adapter
+  fullrank_epochs: 2
+  max_samples_warmup: 6000
+  max_samples_phaseb: 6000
+  fullrank_lr: 1e-05
+  phase_a_max_opt_steps: None
+  phase_b_max_opt_steps: None
+  phase_a_trainables: semantic_adapter_only
+  semantic_max_opt_steps: None
+--- cell 8 exec=6 # @title 2.1 Load Gemma 3 270M ---
+  Gemma layer index for conditioning: -1
+--- cell 10 exec=7 # @title 2.2 Load CLIP Persistently (training scaffold / teacher) ---
+  CLIP frozen. It is a teacher/scaffold only; final inference uses the pruned Gemma-only checkpoint.
+--- cell 14 exec=8 # @title 3.1 Load StyleJourney SD UNet + VAE + Scheduler from Colab safetensors ---
+Loading Stable Diffusion checkpoint from: /content/drive/MyDrive/model/stylejourney_v10.safetensors
+Some weights of the model checkpoint were not used when initializing CLIPTextModel: 
+--- cell 15 exec=9 # @title 3.2 UNet Surgery: Add Dual Native Gemma Cross-Attention ---
+CONDITIONING_ARCH = "ella_gemma_connector": skipping DualNativeAttention surgery.
+--- cell 16 exec=10 # @title 3.2b ELLA-Style Gemma Timestep Semantic Connector ---
+Skipping GemmaTimestepSemanticConnector (CONDITIONING_ARCH != ella_gemma_connector)
+--- cell 18 exec=12 # @title 3.3 Verify Dual Forward + Mandatory Pre-Training Diagnostics ---
+Skipping Gemma layer 20: out of range for 19 hidden_states entries
+Gemma layer   4: mean pairwise cos=0.9827, token_var=0.1499
+Gemma layer   8: mean pairwise cos=0.9965, token_var=0.0311
+Gemma layer  12: mean pairwise cos=0.9908, token_var=0.0280
+Gemma layer  16: mean pairwise cos=0.9637, token_var=0.0761
+Gemma layer  18: mean pairwise cos=0.6932, token_var=0.1768
+Teacher text-delta norm=0.022845, relative=0.024572 for prompt: a red sports car on a city street
+[pretrain] student/teacher delta cosine = -0.009813
+[pretrain] student delta norm = 11.4368, teacher delta norm = 4.4541
+[pretrain] delta norm ratio = 2.5677
+--- cell 21 exec=13 # @title 4.0 Streaming IterableDataset + Shuffled DataLoader Helper + Shuffled DataLoader Helper ---
+DataLoader phase=0 epoch=0 max_samples=8 shuffle=True seed=1234
+--- cell 23 exec=14 # @title 4.1 Phase A: Full-Rank / Connector / Semantic Adapter Training: Full-Rank Gemma Branch Warmup + Text-Delta Dist ---
+DataLoader phase=1 epoch=0 max_samples=6000 shuffle=True seed=2234
+semantic step 50: total=1.61956 mse=1.19292 cos=0.58845 norm=0.07650 ctr=0.56645 pooled_cos=0.61594 retrieval=1.000 collapse(pred/clip)=0.799/0.341 norm_ratio=1.512
+semantic step 100: total=1.45097 mse=1.04031 cos=0.51242 norm=0.06333 ctr=0.69311 pooled_cos=0.69783 retrieval=0.500 collapse(pred/clip)=0.820/0.470 norm_ratio=1.539
+semantic step 150: total=1.39818 mse=1.04491 cos=0.51446 norm=0.04815 ctr=0.42003 pooled_cos=0.70289 retrieval=0.750 collapse(pred/clip)=0.711/0.410 norm_ratio=1.489
+semantic step 200: total=1.34670 mse=1.05421 cos=0.51883 norm=0.05133 ctr=0.10119 pooled_cos=0.69215 retrieval=1.000 collapse(pred/clip)=0.516/0.327 norm_ratio=1.488
+semantic step 250: total=1.34164 mse=1.02248 cos=0.50328 norm=0.05185 ctr=0.27278 pooled_cos=0.70855 retrieval=1.000 collapse(pred/clip)=0.597/0.378 norm_ratio=1.445
+semantic step 300: total=1.29731 mse=0.99417 cos=0.48929 norm=0.03673 ctr=0.24657 pooled_cos=0.72093 retrieval=1.000 collapse(pred/clip)=0.606/0.395 norm_ratio=1.546
+semantic step 350: total=1.29153 mse=0.99914 cos=0.49113 norm=0.03678 ctr=0.18814 pooled_cos=0.73673 retrieval=1.000 collapse(pred/clip)=0.706/0.429 norm_ratio=1.579
+semantic step 400: total=1.27840 mse=0.98742 cos=0.48540 norm=0.03280 ctr=0.20042 pooled_cos=0.74485 retrieval=1.000 collapse(pred/clip)=0.651/0.394 norm_ratio=1.544
+semantic step 450: total=1.30914 mse=1.01992 cos=0.50151 norm=0.03173 ctr=0.15266 pooled_cos=0.71439 retrieval=1.000 collapse(pred/clip)=0.648/0.360 norm_ratio=1.539
+semantic step 500: total=1.18641 mse=0.93562 cos=0.46014 norm=0.03254 ctr=0.06291 pooled_cos=0.77434 retrieval=1.000 collapse(pred/clip)=0.539/0.344 norm_ratio=1.486
+semantic step 550: total=1.28140 mse=1.00079 cos=0.49196 norm=0.03149 ctr=0.13377 pooled_cos=0.75112 retrieval=1.000 collapse(pred/clip)=0.621/0.407 norm_ratio=1.588
+semantic step 600: total=1.21579 mse=0.95032 cos=0.46713 norm=0.02824 ctr=0.12422 pooled_cos=0.76560 retrieval=1.000 collapse(pred/clip)=0.599/0.380 norm_ratio=1.532
+semantic step 650: total=1.09465 mse=0.86385 cos=0.42509 norm=0.03092 ctr=0.05263 pooled_cos=0.78990 retrieval=1.000 collapse(pred/clip)=0.565/0.397 norm_ratio=1.502
+semantic step 700: total=1.14660 mse=0.90597 cos=0.44563 norm=0.02853 ctr=0.05339 pooled_cos=0.80696 retrieval=1.000 collapse(pred/clip)=0.627/0.407 norm_ratio=1.493
+semantic step 750: total=1.19693 mse=0.94603 cos=0.46527 norm=0.02905 ctr=0.05502 pooled_cos=0.75921 retrieval=1.000 collapse(pred/clip)=0.577/0.391 norm_ratio=1.472
+semantic step 800: total=1.04834 mse=0.83073 cos=0.40856 norm=0.02460 ctr=0.03586 pooled_cos=0.83877 retrieval=1.000 collapse(pred/clip)=0.608/0.411 norm_ratio=1.495
+semantic step 850: total=1.12304 mse=0.88422 cos=0.43519 norm=0.02353 ctr=0.07667 pooled_cos=0.80669 retrieval=1.000 collapse(pred/clip)=0.618/0.406 norm_ratio=1.506
+semantic step 900: total=1.06069 mse=0.83403 cos=0.41055 norm=0.02658 ctr=0.07367 pooled_cos=0.84718 retrieval=1.000 collapse(pred/clip)=0.621/0.469 norm_ratio=1.492
+semantic step 950: total=1.21825 mse=0.95756 cos=0.47096 norm=0.02638 ctr=0.09306 pooled_cos=0.74510 retrieval=1.000 collapse(pred/clip)=0.605/0.395 norm_ratio=1.493
+semantic step 1000: total=1.21488 mse=0.94560 cos=0.46486 norm=0.02059 ctr=0.15850 pooled_cos=0.74207 retrieval=1.000 collapse(pred/clip)=0.599/0.377 norm_ratio=1.471
+semantic step 1050: total=1.18223 mse=0.93125 cos=0.45807 norm=0.02180 ctr=0.08246 pooled_cos=0.76507 retrieval=1.000 collapse(pred/clip)=0.571/0.378 norm_ratio=1.510
+semantic step 1100: total=1.09634 mse=0.86287 cos=0.42442 norm=0.02238 ctr=0.07832 pooled_cos=0.82393 retrieval=1.000 collapse(pred/clip)=0.595/0.447 norm_ratio=1.479
+semantic step 1150: total=1.24153 mse=0.98687 cos=0.48488 norm=0.02092 ctr=0.03492 pooled_cos=0.78391 retrieval=1.000 collapse(pred/clip)=0.498/0.357 norm_ratio=1.570
+semantic step 1200: total=1.07825 mse=0.85226 cos=0.41919 norm=0.02198 ctr=0.05450 pooled_cos=0.82570 retrieval=1.000 collapse(pred/clip)=0.582/0.452 norm_ratio=1.496
+semantic step 1250: total=1.12151 mse=0.89293 cos=0.43914 norm=0.02169 ctr=0.01790 pooled_cos=0.81141 retrieval=1.000 collapse(pred/clip)=0.494/0.384 norm_ratio=1.536
+semantic step 1300: total=1.16007 mse=0.91988 cos=0.45222 norm=0.02076 ctr=0.04445 pooled_cos=0.76473 retrieval=1.000 collapse(pred/clip)=0.567/0.365 norm_ratio=1.525
+semantic step 1350: total=1.09168 mse=0.85851 cos=0.42229 norm=0.02244 ctr=0.08207 pooled_cos=0.80483 retrieval=1.000 collapse(pred/clip)=0.540/0.418 norm_ratio=1.472
+semantic step 1400: total=1.13879 mse=0.89727 cos=0.44107 norm=0.02449 ctr=0.07431 pooled_cos=0.78426 retrieval=1.000 collapse(pred/clip)=0.608/0.441 norm_ratio=1.475
+semantic step 1450: total=1.10156 mse=0.87109 cos=0.42814 norm=0.01813 ctr=0.05935 pooled_cos=0.78284 retrieval=1.000 collapse(pred/clip)=0.545/0.372 norm_ratio=1.463
+semantic step 1500: total=1.13653 mse=0.90412 cos=0.44457 norm=0.01474 ctr=0.03219 pooled_cos=0.80308 retrieval=1.000 collapse(pred/clip)=0.573/0.409 norm_ratio=1.484
+DataLoader phase=1 epoch=1 max_samples=6000 shuffle=True seed=2235
+semantic step 1550: total=1.28864 mse=0.97448 cos=0.47876 norm=0.02642 ctr=0.34089 pooled_cos=0.64867 retrieval=0.750 collapse(pred/clip)=0.581/0.279 norm_ratio=1.396
+semantic step 1600: total=1.23811 mse=0.96755 cos=0.47559 norm=0.01560 ctr=0.14433 pooled_cos=0.66554 retrieval=1.000 collapse(pred/clip)=0.478/0.294 norm_ratio=1.367
+semantic step 1650: total=1.39250 mse=1.07746 cos=0.52954 norm=0.02431 ctr=0.22093 pooled_cos=0.66736 retrieval=1.000 collapse(pred/clip)=0.584/0.412 norm_ratio=1.569
+semantic step 1700: total=1.11454 mse=0.88593 cos=0.43552 norm=0.01938 ctr=0.02999 pooled_cos=0.69274 retrieval=1.000 collapse(pred/clip)=0.421/0.242 norm_ratio=1.296
+semantic step 1750: total=1.28220 mse=1.00295 cos=0.49314 norm=0.01652 ctr=0.14278 pooled_cos=0.65463 retrieval=1.000 collapse(pred/clip)=0.475/0.310 norm_ratio=1.354
+semantic step 1800: total=1.23619 mse=0.97343 cos=0.47854 norm=0.01888 ctr=0.09385 pooled_cos=0.67326 retrieval=1.000 collapse(pred/clip)=0.483/0.345 norm_ratio=1.436
+semantic step 1850: total=1.30888 mse=1.01033 cos=0.49675 norm=0.02258 ctr=0.22263 pooled_cos=0.64510 retrieval=1.000 collapse(pred/clip)=0.527/0.350 norm_ratio=1.431
+semantic step 1900: total=1.43264 mse=1.12298 cos=0.55141 norm=0.01351 ctr=0.15283 pooled_cos=0.61030 retrieval=1.000 collapse(pred/clip)=0.585/0.273 norm_ratio=1.442
+semantic step 1950: total=1.16834 mse=0.91535 cos=0.45010 norm=0.01422 ctr=0.12191 pooled_cos=0.68655 retrieval=1.000 collapse(pred/clip)=0.527/0.359 norm_ratio=1.355
+semantic step 2000: total=1.13980 mse=0.90386 cos=0.44447 norm=0.01330 ctr=0.05192 pooled_cos=0.72803 retrieval=1.000 collapse(pred/clip)=0.501/0.399 norm_ratio=1.423
+semantic step 2050: total=1.29607 mse=1.01831 cos=0.50095 norm=0.01649 ctr=0.11579 pooled_cos=0.65851 retrieval=1.000 collapse(pred/clip)=0.538/0.357 norm_ratio=1.441
+semantic step 2100: total=1.17983 mse=0.93039 cos=0.45749 norm=0.01052 ctr=0.09035 pooled_cos=0.70245 retrieval=1.000 collapse(pred/clip)=0.493/0.325 norm_ratio=1.393
+semantic step 2150: total=1.22674 mse=0.96651 cos=0.47558 norm=0.01212 ctr=0.09708 pooled_cos=0.69592 retrieval=1.000 collapse(pred/clip)=0.559/0.349 norm_ratio=1.423
+semantic step 2200: total=1.21713 mse=0.95913 cos=0.47126 norm=0.01665 ctr=0.09102 pooled_cos=0.67996 retrieval=1.000 collapse(pred/clip)=0.510/0.342 norm_ratio=1.393
+semantic step 2250: total=1.20867 mse=0.94092 cos=0.46168 norm=0.01267 ctr=0.16869 pooled_cos=0.68404 retrieval=1.000 collapse(pred/clip)=0.614/0.342 norm_ratio=1.392
+semantic step 2300: total=1.19984 mse=0.93879 cos=0.46149 norm=0.01524 ctr=0.13245 pooled_cos=0.69772 retrieval=1.000 collapse(pred/clip)=0.570/0.389 norm_ratio=1.422
+semantic step 2350: total=1.27107 mse=0.98632 cos=0.48452 norm=0.01530 ctr=0.19337 pooled_cos=0.64524 retrieval=0.750 collapse(pred/clip)=0.502/0.249 norm_ratio=1.369
+semantic step 2400: total=1.13726 mse=0.90197 cos=0.44329 norm=0.02075 ctr=0.04232 pooled_cos=0.72162 retrieval=1.000 collapse(pred/clip)=0.548/0.340 norm_ratio=1.449
+semantic step 2450: total=1.26993 mse=0.99190 cos=0.48712 norm=0.01258 ctr=0.15666 pooled_cos=0.66444 retrieval=1.000 collapse(pred/clip)=0.557/0.325 norm_ratio=1.392
+semantic step 2500: total=1.15198 mse=0.90955 cos=0.44694 norm=0.01280 ctr=0.07877 pooled_cos=0.67840 retrieval=1.000 collapse(pred/clip)=0.491/0.246 norm_ratio=1.404
+semantic step 2550: total=1.11809 mse=0.88928 cos=0.43712 norm=0.01691 ctr=0.03009 pooled_cos=0.69157 retrieval=1.000 collapse(pred/clip)=0.448/0.251 norm_ratio=1.350
+semantic step 2600: total=1.19040 mse=0.94319 cos=0.46316 norm=0.01497 ctr=0.05943 pooled_cos=0.66624 retrieval=1.000 collapse(pred/clip)=0.474/0.262 norm_ratio=1.305
+semantic step 2650: total=1.33496 mse=1.04494 cos=0.51283 norm=0.02524 ctr=0.13648 pooled_cos=0.67331 retrieval=1.000 collapse(pred/clip)=0.593/0.321 norm_ratio=1.554
+semantic step 2700: total=1.03429 mse=0.82011 cos=0.40319 norm=0.01448 ctr=0.04485 pooled_cos=0.73449 retrieval=1.000 collapse(pred/clip)=0.482/0.299 norm_ratio=1.413
+semantic step 2750: total=1.28526 mse=1.01685 cos=0.50012 norm=0.01427 ctr=0.07391 pooled_cos=0.64155 retrieval=1.000 collapse(pred/clip)=0.482/0.280 norm_ratio=1.411
+semantic step 2800: total=1.06140 mse=0.84494 cos=0.41531 norm=0.01538 ctr=0.02480 pooled_cos=0.72215 retrieval=1.000 collapse(pred/clip)=0.422/0.288 norm_ratio=1.316
+semantic step 2850: total=1.12217 mse=0.88957 cos=0.43707 norm=0.01991 ctr=0.04547 pooled_cos=0.70889 retrieval=1.000 collapse(pred/clip)=0.498/0.280 norm_ratio=1.375
+semantic step 2900: total=1.05540 mse=0.82626 cos=0.40636 norm=0.01343 ctr=0.11303 pooled_cos=0.72571 retrieval=1.000 collapse(pred/clip)=0.577/0.364 norm_ratio=1.306
+semantic step 2950: total=0.89964 mse=0.71223 cos=0.35057 norm=0.01972 ctr=0.03594 pooled_cos=0.78317 retrieval=1.000 collapse(pred/clip)=0.497/0.364 norm_ratio=1.314
+semantic step 3000: total=1.05892 mse=0.82448 cos=0.40530 norm=0.01246 ctr=0.14336 pooled_cos=0.72029 retrieval=1.000 collapse(pred/clip)=0.537/0.325 norm_ratio=1.304
+Phase A semantic adapter complete: steps=3000, best_loss=0.8476237654685974
+[post_semantic] student/teacher delta cosine = 0.260398
+[post_semantic] student delta norm = 11.2650, teacher delta norm = 2.6765
+[post_semantic] delta norm ratio = 4.2088
+Semantic-adapter post-train sensitivity: 0.055579
+--- cell 26 exec=16 # @title 4.4 Phase B: Gemma-Only Continuation + Text-Delta Teacher Decay ---
+Phase B complete. Next: validation grids, checkpoints, and reloaded-pruned final proof.
+--- cell 28 exec=17 # @title 5.1 Fixed Validation Grids + Prompt Sensitivity Diagnostics ---
+Output hidden; open in https://colab.research.google.com to view.
+--- cell 30 exec=19 # @title 5.2 Save Dual + Pruned Gemma-Only Checkpoints ---
+Semantic adapter checkpoint saved: /content/drive/MyDrive/gemma3-sd/gemma_semantic_adapter_phase1.pt
+Semantic adapter checkpoint self-test strict-reload: PASS
+--- cell 31 exec=20 # @title 5.3 Final Proof from Freshly Reloaded Pruned Checkpoint ---
+Semantic adapter reload proof: PASS (strict=True)
+Reloaded semantic adapter finite UNet forward: PASS
+Generating reloaded semantic adapter: a cat sitting on a windowsill looking outside
+Proof reloaded semantic:  37%|███▋      | 11/30 [00:01<00:01, 10.31it/s]
+OutOfMemoryError: CUDA out of memory. Tried to allocate 30.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 19.44 MiB is free. Including non-PyTorch memory, this process has 39.46 GiB memory in use. Of the allocated memory 38.87 GiB is allocated by PyTorch, and 78.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+OutOfMemoryError                          Traceback (most recent call last)
+OutOfMemoryError: CUDA out of memory. Tried to allocate 30.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 19.44 MiB is free. Including non-PyTorch memory, this process has 39.46 GiB memory in use. Of the allocated memory 38.87 GiB is allocated by PyTorch, and 78.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
