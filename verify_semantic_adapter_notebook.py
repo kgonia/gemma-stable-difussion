@@ -105,6 +105,8 @@ def main():
         "SEMANTIC_GENERIC_COMPARISON_GRID": r'validation_semantic_vs_clip_comparison\.png',
         "SEMANTIC_RELOADED_PROOF_GRID": r'samples_reloaded_semantic_adapter\.png',
         "SEMANTIC_CHECKPOINT_SELFTEST": r'Semantic adapter checkpoint self-test strict-reload: PASS',
+        "SEMANTIC_RELOADED_PROOF_INFERENCE_MODE": r'with\s+torch\.inference_mode\(\):.*Proof reloaded semantic.*pred\s*=\s*unet\(inp,\s*t_step,\s*encoder_hidden_states=ctx\)',
+        "CONNECTOR_RELOADED_PROOF_INFERENCE_MODE": r'with\s+torch\.inference_mode\(\):.*Proof reloaded connector.*pred\s*=\s*reloaded_unet\(inp,\s*t_step,\s*encoder_hidden_states=ctx\)',
     }
     for name, pattern in required.items():
         check(results, name, re.search(pattern, full, flags=re.S) is not None)
