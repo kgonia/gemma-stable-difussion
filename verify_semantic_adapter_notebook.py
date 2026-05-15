@@ -93,9 +93,21 @@ def main():
         "LONG_CHECKPOINT": r'gemma_long_context_adapter_phase2\.pt',
         "SARA_CHECKPOINT": r'sara_unet_text_interface_sparse\.pt',
         "SEMANTIC_RELOAD_PROOF": r'Semantic adapter reload proof: PASS',
+        "SEMANTIC_33_SMOKE_TEST": r'def\s+test_semantic_adapter_forward.*Semantic adapter frozen-UNet smoke test OK',
+        "SEMANTIC_DIAGNOSTIC_BRANCH": r'elif\s+CONDITIONING_ARCH\s*==\s*"gemma_clip_semantic_adapter".*compute_semantic_adapter_prompt_sensitivity',
+        "SEMANTIC_DELTA_ALIGNMENT_BRANCH": r'elif\s+CONDITIONING_ARCH\s*==\s*"gemma_clip_semantic_adapter"\s+and\s+semantic_adapter\s+is\s+not\s+None.*student_context\s*=\s*semantic_adapter',
+        "SEMANTIC_OVERFIT_FIXED_LOSS_BRANCH": r'elif\s+CONDITIONING_ARCH\s*==\s*"gemma_clip_semantic_adapter".*context\s*=\s*semantic_adapter.*pred\s*=\s*unet\(noisy,\s*t,\s*encoder_hidden_states=context\)',
     }
     for name, pattern in required.items():
         check(results, name, re.search(pattern, full, flags=re.S) is not None)
+
+    # Regression check for the Colab crash where semantic mode fell through to connector smoke test.
+    bad_fallthrough = re.search(
+        r'if\s+CONDITIONING_ARCH\s*==\s*"dual_native".*?else:\s*\n\s*test_connector_forward\(\)',
+        full,
+        flags=re.S,
+    )
+    check(results, "NO_SEMANTIC_CONNECTOR_FALLTHROUGH", bad_fallthrough is None)
 
     # Ensure old architectures are still present, not deleted.
     check(results, "OLD_DUAL_NATIVE_PATH_RETAINED", 'CONDITIONING_ARCH == "dual_native"' in full)
