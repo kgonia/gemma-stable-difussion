@@ -655,6 +655,10 @@ def run_ella_training(state: TrainingState):
                         cfg.val_prompts[0], state,
                         label=f"ella_step_{opt_step:06d}",
                         wandb=state.wandb)
+                if (cfg.generation_grid_every_opt_steps > 0
+                        and opt_step % cfg.generation_grid_every_opt_steps == 0):
+                    save_checkpoint_grid(
+                        f"ella_step_{opt_step:06d}", state)
 
             progress.set_postfix(
                 {"loss": f"{loss.item():.4f}", "best": f"{best:.4f}"})
@@ -896,6 +900,10 @@ def run_sara_training(state: TrainingState):
                         cfg.val_prompts[0], state,
                         label=f"sara_step_{opt_step:06d}",
                         wandb=state.wandb)
+                if (cfg.generation_grid_every_opt_steps > 0
+                        and opt_step % cfg.generation_grid_every_opt_steps == 0):
+                    save_checkpoint_grid(
+                        f"sara_step_{opt_step:06d}", state)
 
             progress.set_postfix(
                 {"loss": f"{loss.item():.4f}", "best": f"{best:.4f}"})
@@ -934,6 +942,32 @@ def run_sara_training(state: TrainingState):
 # ---------------------------------------------------------------------------
 # Validation & Final proof
 # ---------------------------------------------------------------------------
+def save_checkpoint_grid(label: str, state: TrainingState):
+    """Generate + save a validation image grid at a training checkpoint."""
+    cfg = state.cfg
+    imgs, labels = [], []
+    for ptxt in cfg.val_prompts:
+        imgs.append(generate_ella(ptxt, state, steps=cfg.val_steps,
+                                   guidance=cfg.val_guidance,
+                                   seed=cfg.val_seed))
+        labels.append(f"ELLA L{cfg.context_tokens}: {ptxt[:40]}")
+    grid_path = f"{cfg.output_dir}/{label}_ella_L{cfg.context_tokens}.png"
+    save_validation_grid(imgs, labels, grid_path,
+                         f"ELLA L{cfg.context_tokens} [{label}]")
+    print(f"Checkpoint grid saved: {grid_path}")
+
+    if state.clip_model is not None:
+        clip_imgs, clip_labels = [], []
+        for ptxt in cfg.val_prompts:
+            clip_imgs.append(generate_clip_teacher(
+                ptxt, state, steps=cfg.val_steps,
+                guidance=cfg.val_guidance, seed=cfg.val_seed))
+            clip_labels.append("CLIP teacher")
+        clip_path = f"{cfg.output_dir}/{label}_clip_teacher.png"
+        save_validation_grid(clip_imgs, clip_labels, clip_path,
+                             f"CLIP teacher [{label}]")
+
+
 def run_validation_grids(state: TrainingState):
     cfg = state.cfg
     print("Prompt sensitivity:")

@@ -59,6 +59,7 @@ class TrainConfig:
     ella_max_opt_steps: int = 1500
     sara_max_opt_steps: int = 500
     validation_every_opt_steps: int = 250
+    generation_grid_every_opt_steps: int = 500  # 0 = off; save image grid during training
     shuffle_streaming: bool = True
 
     # --- Model IDs ---
