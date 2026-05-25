@@ -138,6 +138,9 @@ class TrainConfig:
     # --- Complex / long-context prompt grids (from colab notebook) ---
     run_complex_prompt_grids: bool = True
     run_suffix_counterfactual_grids: bool = True
+    suffix_counterfactual_loss_weight: float = 0.0   # set >0 to add training-time suffix pressure
+    suffix_counterfactual_loss_every: int = 0         # apply every N steps (0=disabled)
+    suffix_counterfactual_loss_margin: float = 0.05   # hinge margin for rel_diff
     complex_prompt_steps: int = 30
     complex_prompt_guidance: float = 5.5
     complex_prompt_seed: int = 777

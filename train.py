@@ -68,6 +68,8 @@ from pure_ella.diagnostics import (
     _rel_diff,
     _to_float_maybe,
     connector_extra_grad_stats,
+    suffix_counterfactual_sensitivity,
+    suffix_counterfactual_contrastive_loss,
     summarize_context_tokens,
     zero_extra_tokens,
     generate_case_image,
@@ -607,6 +609,18 @@ def run_ella_training(state: TrainingState):
                     + cfg.lambda_teacher * loss_teacher
                     + cfg.lambda_text_delta * loss_delta
                     + cfg.phase1_semantic_anchor_weight * loss_anchor)
+
+            # ── suffix counterfactual contrastive loss (training pressure) ──
+            loss_suffix_cf = loss.new_tensor(0.0)
+            if (cfg.suffix_counterfactual_loss_weight > 0
+                    and cfg.suffix_counterfactual_loss_every > 0
+                    and (opt_step + 1) % cfg.suffix_counterfactual_loss_every == 0
+                    and cfg.context_tokens > cfg.clip_anchor_tokens):
+                loss_suffix_cf = suffix_counterfactual_contrastive_loss(
+                    state, margin=cfg.suffix_counterfactual_loss_margin)
+                if torch.isfinite(loss_suffix_cf):
+                    loss = loss + cfg.suffix_counterfactual_loss_weight * loss_suffix_cf
+
             if not torch.isfinite(loss):
                 raise RuntimeError("ELLA loss NaN/Inf")
 
@@ -617,9 +631,12 @@ def run_ella_training(state: TrainingState):
                 "loss_teacher": float(loss_teacher.item()),
                 "loss_delta": float(loss_delta.item()),
                 "loss_anchor": float(loss_anchor.item()),
+                "loss_suffix_cf": float(loss_suffix_cf.item()),
             }
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            grad_stats = connector_extra_grad_stats(
+                state.connector, cfg.clip_anchor_tokens, state)
             nn.utils.clip_grad_norm_(state.connector.parameters(),
                                       cfg.grad_clip_norm)
             optimizer.step()
@@ -635,6 +652,19 @@ def run_ella_training(state: TrainingState):
                     "ella/loss_teacher": float(loss_teacher.item()),
                     "ella/loss_delta": float(loss_delta.item()),
                     "ella/loss_anchor": float(loss_anchor.item()),
+                    "ella/loss_suffix_cf": float(loss_suffix_cf.item()),
+                    "ella/extra_gate_grad_norm":
+                        grad_stats["extra_gate_grad_norm"]
+                        if grad_stats["extra_gate_grad_norm"] is not None
+                        else 0.0,
+                    "ella/extra_query_grad_norm":
+                        grad_stats["extra_query_grad_norm"]
+                        if grad_stats["extra_query_grad_norm"] is not None
+                        else 0.0,
+                    "ella/extra_pos_grad_norm":
+                        grad_stats["extra_pos_grad_norm"]
+                        if grad_stats["extra_pos_grad_norm"] is not None
+                        else 0.0,
                 }, wandb=state.wandb)
 
             if (cfg.validation_every_opt_steps
@@ -652,9 +682,19 @@ def run_ella_training(state: TrainingState):
                     label=f"ella_step_{opt_step:06d}", wandb=state.wandb)
                 if (cfg.run_long_context_diagnostics
                         and cfg.context_tokens > cfg.clip_anchor_tokens):
-                    extra_token_ablation_metrics(
+                    ab = extra_token_ablation_metrics(
                         cfg.val_prompts[0], state,
                         label=f"ella_step_{opt_step:06d}",
+                        wandb=state.wandb)
+                    zd = ab.get("rel_diff_full_vs_zeroextra_delta")
+                    if zd is not None:
+                        safe_wandb_log({"ella/suffix_zero_delta": zd}, wandb=state.wandb)
+                        if zd < 0.03:
+                            print(f"⚠  LOW suffix sensitivity: "
+                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} — "
+                                  f"extra tokens have almost no effect on CFG delta")
+                    suffix_counterfactual_sensitivity(
+                        state, label=f"ella_step_{opt_step:06d}",
                         wandb=state.wandb)
                 if (cfg.generation_grid_every_opt_steps > 0
                         and opt_step % cfg.generation_grid_every_opt_steps == 0):
@@ -897,9 +937,19 @@ def run_sara_training(state: TrainingState):
                     label=f"sara_step_{opt_step:06d}", wandb=state.wandb)
                 if (cfg.run_long_context_diagnostics
                         and cfg.context_tokens > cfg.clip_anchor_tokens):
-                    extra_token_ablation_metrics(
+                    ab = extra_token_ablation_metrics(
                         cfg.val_prompts[0], state,
                         label=f"sara_step_{opt_step:06d}",
+                        wandb=state.wandb)
+                    zd = ab.get("rel_diff_full_vs_zeroextra_delta")
+                    if zd is not None:
+                        safe_wandb_log({"sara/suffix_zero_delta": zd}, wandb=state.wandb)
+                        if zd < 0.03:
+                            print(f"⚠  LOW suffix sensitivity: "
+                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} — "
+                                  f"extra tokens have almost no effect on CFG delta")
+                    suffix_counterfactual_sensitivity(
+                        state, label=f"sara_step_{opt_step:06d}",
                         wandb=state.wandb)
                 if (cfg.generation_grid_every_opt_steps > 0
                         and opt_step % cfg.generation_grid_every_opt_steps == 0):

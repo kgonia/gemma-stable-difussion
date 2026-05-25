@@ -28,7 +28,7 @@
   "connector_ff_mult": 4,
   "connector_dropout": 0.0,
   "connector_time_embed_dim": 768,
-  "connector_extra_gate_init": -5.0,
+  "connector_extra_gate_init": -3.5,
   "recursive_y_steps": 2,
   "recursive_y_gate_init": -2.0,
   "trm_outer_steps": 3,

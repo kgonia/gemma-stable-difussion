@@ -632,3 +632,139 @@ def save_suffix_counterfactual_grids(
         save_validation_grid(imgs, labels, out_path, f"{title_prefix}: {case['name']}")
         out_paths.append(out_path)
     return out_paths
+
+
+# ---------------------------------------------------------------------------
+# Suffix counterfactual sensitivity (diagnostic + training loss)
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def suffix_counterfactual_sensitivity(
+    state, label: str = "suffix_cf", wandb=None,
+) -> dict:
+    """Measure how much varying the suffix changes the CFG delta.
+    
+    Returns rel_diff between delta_A and delta_B for each counterfactual case.
+    Higher = suffix is actually changing the UNet output.
+    """
+    cfg = state.cfg
+    ctx = cfg.context_tokens
+    if ctx <= cfg.clip_anchor_tokens or not cfg.suffix_counterfactual_cases:
+        return {"suffix_sensitivity": None}
+    
+    connector = state.connector
+    unet = state.unet
+    scheduler = state.scheduler
+    device = state.device
+    unet_dtype = state.unet_dtype
+    encode_gemma = state.encode_gemma
+    
+    connector.eval(); unet.eval()
+    prefix = cfg.suffix_counterfactual_prefix
+    timestep = cfg.extra_token_diagnostic_timestep
+    
+    sensitivities = {}
+    for case in cfg.suffix_counterfactual_cases:
+        name = case["name"]
+        prompt_a = prefix + " " + case["prompt_suffix_a"]
+        prompt_b = prefix + " " + case["prompt_suffix_b"]
+        
+        gen = torch.Generator(device=device).manual_seed(int(case.get("seed", 777)))
+        latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
+        noise = torch.randn_like(latent)
+        t = torch.tensor([int(timestep)], device=device).long()
+        noisy = scheduler.add_noise(latent, noise, t)
+        
+        # Encode prompts
+        gh_a, gm_a = encode_gemma([prompt_a])
+        gh_b, gm_b = encode_gemma([prompt_b])
+        ugh_a, ugm_a = encode_gemma([""])
+        ugh_b, ugm_b = encode_gemma([""])
+        
+        # Get contexts (cond + uncond for each)
+        ctx_a_c = connector(gh_a.to(dtype=unet_dtype), t, gm_a, context_tokens=ctx)
+        ctx_a_u = connector(ugh_a.to(dtype=unet_dtype), t, ugm_a, context_tokens=ctx)
+        ctx_b_c = connector(gh_b.to(dtype=unet_dtype), t, gm_b, context_tokens=ctx)
+        ctx_b_u = connector(ugh_b.to(dtype=unet_dtype), t, ugm_b, context_tokens=ctx)
+        
+        # UNet predictions
+        pred_a_c = unet(noisy, t, encoder_hidden_states=ctx_a_c).sample.float()
+        pred_a_u = unet(noisy, t, encoder_hidden_states=ctx_a_u).sample.float()
+        pred_b_c = unet(noisy, t, encoder_hidden_states=ctx_b_c).sample.float()
+        pred_b_u = unet(noisy, t, encoder_hidden_states=ctx_b_u).sample.float()
+        
+        delta_a = pred_a_c - pred_a_u
+        delta_b = pred_b_c - pred_b_u
+        
+        sensitivity = _rel_diff(delta_a, delta_b)
+        sensitivities[name] = sensitivity
+        print(f"[{label}] {name}: suffix_sensitivity={sensitivity:.5f}")
+    
+    mean_sens = float(np.mean(list(sensitivities.values()))) if sensitivities else 0.0
+    _log_metrics(f"suffix_sensitivity/{label}", sensitivities, wandb=wandb)
+    safe_wandb_log({f"suffix_sensitivity/{label}_mean": mean_sens}, wandb=wandb)
+    return {"suffix_sensitivity_mean": mean_sens, "per_case": sensitivities}
+
+
+def suffix_counterfactual_contrastive_loss(
+    state, margin: float = 0.05,
+) -> torch.Tensor:
+    """Training-time loss: penalize when suffix variants produce identical CFG deltas.
+    
+    For each counterfactual case, computes:
+        loss = max(0, margin - rel_diff(delta_a, delta_b))
+    
+    Returns a scalar loss that encourages suffix sensitivity.
+    """
+    cfg = state.cfg
+    ctx = cfg.context_tokens
+    if ctx <= cfg.clip_anchor_tokens or not cfg.suffix_counterfactual_cases:
+        return torch.tensor(0.0, device=state.device)
+    
+    connector = state.connector
+    unet = state.unet
+    scheduler = state.scheduler
+    device = state.device
+    unet_dtype = state.unet_dtype
+    encode_gemma = state.encode_gemma
+    
+    prefix = cfg.suffix_counterfactual_prefix
+    timestep = cfg.extra_token_diagnostic_timestep
+    
+    total_loss = torch.tensor(0.0, device=device)
+    n_cases = 0
+    
+    for case in cfg.suffix_counterfactual_cases:
+        prompt_a = prefix + " " + case["prompt_suffix_a"]
+        prompt_b = prefix + " " + case["prompt_suffix_b"]
+        seed = int(case.get("seed", 777))
+        
+        gen = torch.Generator(device=device).manual_seed(seed)
+        latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
+        noise = torch.randn_like(latent)
+        t = torch.tensor([int(timestep)], device=device).long()
+        noisy = scheduler.add_noise(latent, noise, t)
+        
+        gh_a, gm_a = encode_gemma([prompt_a])
+        gh_b, gm_b = encode_gemma([prompt_b])
+        ugh, ugm = encode_gemma([""])
+        
+        ctx_a_c = connector(gh_a.to(dtype=unet_dtype), t, gm_a, context_tokens=ctx)
+        ctx_a_u = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=ctx)
+        ctx_b_c = connector(gh_b.to(dtype=unet_dtype), t, gm_b, context_tokens=ctx)
+        ctx_b_u = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=ctx)
+        
+        pred_a_c = unet(noisy, t, encoder_hidden_states=ctx_a_c).sample.float()
+        pred_a_u = unet(noisy, t, encoder_hidden_states=ctx_a_u).sample.float()
+        pred_b_c = unet(noisy, t, encoder_hidden_states=ctx_b_c).sample.float()
+        pred_b_u = unet(noisy, t, encoder_hidden_states=ctx_b_u).sample.float()
+        
+        delta_a = pred_a_c - pred_a_u
+        delta_b = pred_b_c - pred_b_u
+        
+        rd = (delta_a - delta_b).pow(2).mean().sqrt() / (delta_b.pow(2).mean().sqrt().clamp_min(1e-8))
+        total_loss = total_loss + F.relu(margin - rd)
+        n_cases += 1
+    
+    if n_cases == 0:
+        return torch.tensor(0.0, device=device)
+    return total_loss / n_cases
