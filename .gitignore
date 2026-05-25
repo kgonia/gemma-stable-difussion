@@ -9,3 +9,5 @@ dataset.zip
 sd-scripts/
 *:Zone.Identifier
 output/
+.env_wandb
+wandb/
