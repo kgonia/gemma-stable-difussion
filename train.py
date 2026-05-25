@@ -62,6 +62,9 @@ from pure_ella.diagnostics import (
     connector_extra_grad_stats,
     summarize_context_tokens,
     zero_extra_tokens,
+    generate_case_image,
+    save_complex_case_grid,
+    save_suffix_counterfactual_grids,
 )
 
 
@@ -897,6 +900,61 @@ def run_reload_proof(state: TrainingState):
 
 
 # ---------------------------------------------------------------------------
+# Complex prompt checks (post-training)
+# ---------------------------------------------------------------------------
+def run_complex_prompt_checks(state: TrainingState):
+    """Generate complex prompt grids after training, same as colab notebooks."""
+    cfg = state.cfg
+    if not cfg.run_complex_prompt_grids:
+        print("Complex prompt grids skipped (run_complex_prompt_grids=False)")
+        return
+
+    ctx = cfg.context_tokens
+    out = cfg.output_dir
+
+    # Complex generation cases grid
+    cmplx_path = f"{out}/validation_complex_prompts_L{ctx}.png"
+    save_complex_case_grid(
+        cfg.complex_generation_cases, cmplx_path,
+        f"Complex natural-language prompts L{ctx}", state,
+        context_tokens=ctx,
+    )
+    print(f"Complex prompt grid saved: {cmplx_path}")
+
+    # Long-context eval: short vs long prompts paired
+    long_imgs, long_labels = [], []
+    for short, long in zip(cfg.long_eval_short_controls, cfg.long_eval_prompts):
+        long_imgs.append(generate_ella(
+            short, state,
+            steps=cfg.val_steps, guidance=cfg.val_guidance,
+            seed=cfg.val_seed, context_tokens=cfg.clip_anchor_tokens,
+        ))
+        long_labels.append(f"short L{cfg.clip_anchor_tokens}")
+        long_imgs.append(generate_ella(
+            long, state,
+            steps=cfg.val_steps, guidance=cfg.val_guidance,
+            seed=cfg.val_seed, context_tokens=ctx,
+        ))
+        long_labels.append(f"long L{ctx}")
+    long_path = f"{out}/validation_long_context_L{ctx}.png"
+    save_validation_grid(long_imgs, long_labels, long_path,
+                         f"Long-context ELLA L{ctx}")
+    print(f"Long-context grid saved: {long_path}")
+
+    # Suffix counterfactual grids
+    if cfg.run_suffix_counterfactual_grids and ctx > cfg.clip_anchor_tokens:
+        sfx_out = save_suffix_counterfactual_grids(
+            cfg.suffix_counterfactual_cases,
+            f"{out}/validation_suffix_counterfactual_L{ctx}",
+            "Suffix counterfactuals", state, context_tokens=ctx,
+        )
+        for p in sfx_out:
+            print(f"Suffix counterfactual grid saved: {p}")
+    elif ctx <= cfg.clip_anchor_tokens:
+        print("Suffix counterfactual grids skipped at 77-token stage")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -982,6 +1040,7 @@ def main():
     run_sara_training(state)
 
     run_validation_grids(state)
+    run_complex_prompt_checks(state)
     run_save_artifacts(state)
     run_reload_proof(state)
 

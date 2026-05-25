@@ -134,6 +134,59 @@ class TrainConfig:
         "a watercolor painting of a mountain lake",
         "a neon-lit cyberpunk alleyway at night",
     ])
+    # --- Complex / long-context prompt grids (from colab notebook) ---
+    run_complex_prompt_grids: bool = True
+    run_suffix_counterfactual_grids: bool = True
+    complex_prompt_steps: int = 30
+    complex_prompt_guidance: float = 5.5
+    complex_prompt_seed: int = 777
+    complex_prompt_width: int = 512
+    complex_prompt_height: int = 512
+    complex_generation_cases: List[dict] = field(default_factory=lambda: [
+        {
+            "name": "retrofuturist_magazine_cars",
+            "prompt": "A highly detailed retrofuturist magazine infographic about future cars, laid out like a beautifully preserved issue of Popular Mechanics, with elegant diagram panels, mechanical callouts, polished concept-art rendering, vivid color, and the feeling of an award-winning poster-sized editorial spread.",
+            "steps": 30, "guidance": 7.0, "seed": 3197632166, "width": 512, "height": 512,
+        },
+        {
+            "name": "warrior_princess_poster",
+            "prompt": "A dramatic poster of a warrior princess standing centered on a hill as the main cinematic key visual, with intricate linework, vibrant colors, panoramic scale, breathtaking fantasy atmosphere, and the finish of a carefully painted illustrated poster.",
+            "steps": 30, "guidance": 7.0, "seed": 4267154965, "width": 512, "height": 512,
+        },
+    ])
+    long_eval_prompts: List[str] = field(default_factory=lambda: [
+        "a cinematic photo of a red vintage motorcycle parked beside a stone cottage, with a brass telescope on the seat, blue wildflowers in the basket, and a tiny owl perched on the handlebar at sunrise",
+        "a detailed product photograph of hiking boots on a wooden table, with orange laces, a folded trail map, a silver compass, and raindrops on the leather",
+    ])
+    long_eval_short_controls: List[str] = field(default_factory=lambda: [
+        "a cinematic photo of a red vintage motorcycle parked beside a stone cottage",
+        "a detailed product photograph of hiking boots on a wooden table",
+    ])
+    suffix_counterfactual_prefix: str = (
+        "Describe a single coherent high quality image with natural lighting and realistic materials. "
+        "The composition is centered and calm, with one main subject in the foreground, a readable background, "
+        "gentle shadows, balanced colors, clear edges, and no text overlays. Keep the camera angle slightly low, "
+        "the lens natural, the scene uncluttered, the mood quiet, and the details consistent. "
+        "The setting includes a wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, "
+        "soft window light, distant plants, and warm reflections. "
+        "Use this exact shared setup before the final object instruction:"
+    )
+    suffix_counterfactual_cases: List[dict] = field(default_factory=lambda: [
+        {
+            "name": "object_after_anchor_counterfactual",
+            "short_prompt": "A calm realistic still life scene on a wooden table in soft window light.",
+            "prompt_suffix_a": "Final instruction: make the main object a red ceramic teapot with white flowers painted on it.",
+            "prompt_suffix_b": "Final instruction: make the main object a blue glass violin with silver strings resting beside it.",
+            "seed": 1201, "steps": 30, "guidance": 5.5, "width": 512, "height": 512,
+        },
+        {
+            "name": "action_after_anchor_counterfactual",
+            "short_prompt": "A cinematic outdoor scene with a person standing in a quiet garden at golden hour.",
+            "prompt_suffix_a": "Final instruction: show a woman in a yellow raincoat feeding a small black raven from her hand.",
+            "prompt_suffix_b": "Final instruction: show a man in a purple velvet jacket tuning a brass telescope on a tripod.",
+            "seed": 2202, "steps": 30, "guidance": 5.5, "width": 512, "height": 512,
+        },
+    ])
     extra_token_diagnostic_timestep: int = 500
     extra_token_diagnostic_seed: int = 777
 

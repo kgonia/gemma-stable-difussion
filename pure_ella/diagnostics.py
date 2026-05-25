@@ -552,3 +552,83 @@ def _image_collapse_stats(uint8_images: torch.Tensor) -> dict:
         "quality/edge_density": float(edge),
         "quality/luma_entropy": float(np.mean(hist_vals)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Complex / long-context prompt grids (from colab notebook)
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def generate_case_image(case: dict, state, context_tokens: int = None):
+    """Generate an image from a complex case dict using ELLA connector."""
+    return generate_ella(
+        case["prompt"],
+        state,
+        steps=case.get("steps", state.cfg.val_steps),
+        guidance=case.get("guidance", state.cfg.val_guidance),
+        seed=case.get("seed", state.cfg.val_seed),
+        context_tokens=context_tokens,
+    )
+
+
+@torch.no_grad()
+def save_complex_case_grid(
+    cases: list, path: str, title: str, state,
+    context_tokens: int = None,
+):
+    """Generate a grid from complex prompt cases."""
+    ctx = context_tokens or state.cfg.context_tokens
+    imgs, labels = [], []
+    for case in cases:
+        print(f"Generating complex case: {case['name']}")
+        imgs.append(generate_case_image(case, state, context_tokens=ctx))
+        labels.append(f"L{ctx}: {case['name']}")
+    save_validation_grid(imgs, labels, path, title)
+
+
+@torch.no_grad()
+def save_suffix_counterfactual_grids(
+    cases: list, path_prefix: str, title_prefix: str,
+    state, context_tokens: int = None,
+):
+    """Generate suffix counterfactual grids (short vs long prompt comparisons)."""
+    cfg = state.cfg
+    ctx = context_tokens or cfg.context_tokens
+    if ctx <= cfg.clip_anchor_tokens:
+        print("Suffix counterfactual grids skipped at 77-token stage")
+        return []
+    prefix = cfg.suffix_counterfactual_prefix
+    out_paths = []
+    for case in cases:
+        imgs, labels = [], []
+        print(f"Generating suffix counterfactual grid: {case['name']}")
+        # Short prompt at anchor tokens
+        imgs.append(generate_ella(
+            case["short_prompt"], state,
+            steps=case.get("steps", cfg.val_steps),
+            guidance=case.get("guidance", cfg.val_guidance),
+            seed=case.get("seed", cfg.val_seed),
+            context_tokens=cfg.clip_anchor_tokens,
+        ))
+        labels.append(f"short@77 {case['name']}")
+        # Full prompt A at context_tokens
+        imgs.append(generate_ella(
+            prefix + " " + case["prompt_suffix_a"], state,
+            steps=case.get("steps", cfg.val_steps),
+            guidance=case.get("guidance", cfg.val_guidance),
+            seed=case.get("seed", cfg.val_seed),
+            context_tokens=ctx,
+        ))
+        labels.append(f"fullA@L{ctx} {case['name']}")
+        # Full prompt B at context_tokens
+        imgs.append(generate_ella(
+            prefix + " " + case["prompt_suffix_b"], state,
+            steps=case.get("steps", cfg.val_steps),
+            guidance=case.get("guidance", cfg.val_guidance),
+            seed=case.get("seed", cfg.val_seed),
+            context_tokens=ctx,
+        ))
+        labels.append(f"fullB@L{ctx} {case['name']}")
+        out_path = f"{path_prefix}_{case['name']}.png"
+        save_validation_grid(imgs, labels, out_path, f"{title_prefix}: {case['name']}")
+        out_paths.append(out_path)
+    return out_paths
