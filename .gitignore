@@ -8,3 +8,4 @@ dataset.zip
 *.safetensors
 sd-scripts/
 *:Zone.Identifier
+output/
