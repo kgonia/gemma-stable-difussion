@@ -1,6 +1,6 @@
 {
   "experiment_stage": "stage1_77_pretrain_then_ella",
-  "run_mode": "short_train",
+  "run_mode": "diagnostic",
   "run_final_proof": true,
   "run_fixed_validation_grids": true,
   "run_long_context_diagnostics": true,
@@ -76,7 +76,7 @@
   ],
   "extra_token_diagnostic_timestep": 500,
   "extra_token_diagnostic_seed": 777,
-  "wandb_enabled": true,
+  "wandb_enabled": false,
   "wandb_project": "gemma3-sd-pure-ella",
   "wandb_entity": "",
   "output_dir": "./output",

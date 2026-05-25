@@ -250,8 +250,8 @@ def generate_ella(
 
     gen = torch.Generator(device=device).manual_seed(seed)
     latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
-    scheduler.set_timesteps(steps)
-    timesteps = scheduler.timesteps.to(device)
+    scheduler.set_timesteps(steps, device=device)
+    timesteps = scheduler.timesteps
 
     gh, gm = encode_gemma([prompt])
     ugh, ugm = encode_gemma([""])
@@ -287,8 +287,8 @@ def generate_clip_teacher(prompt: str, state, steps: int = 30, guidance: float =
 
     gen = torch.Generator(device=device).manual_seed(seed)
     latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
-    scheduler.set_timesteps(steps)
-    timesteps = scheduler.timesteps.to(device)
+    scheduler.set_timesteps(steps, device=device)
+    timesteps = scheduler.timesteps
 
     ch, cm = encode_clip([prompt])
     uch, ucm = encode_clip([""])
