@@ -852,7 +852,7 @@ def run_sara_training(state: TrainingState):
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            grad_stats = connector_extra_grad_stats(state.connector)
+            grad_stats = connector_extra_grad_stats(state.connector, cfg.clip_anchor_tokens, state)
             nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip_norm)
             optimizer.step()
             opt_step += 1
