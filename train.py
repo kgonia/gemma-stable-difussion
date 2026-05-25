@@ -5,6 +5,7 @@ pure-ella: Gemma -> Stable Diffusion training with ELLA-style timestep-aware con
 Usage:
     python train.py config.json
     python train.py --config config.json
+    python train.py config.json --phases ella,sara --resume-ckpt /workspace/output/ella_connector_clip_pretrain.pt
     python train.py --help
 """
 
@@ -1247,6 +1248,26 @@ def run_complex_prompt_checks(state: TrainingState):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def _load_connector_checkpoint(state: TrainingState, ckpt_path: str):
+    """Load a connector checkpoint saved by run_clip_pretrain."""
+    if not ckpt_path or not os.path.exists(ckpt_path):
+        print(f"Checkpoint not found: {ckpt_path}")
+        return False
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    sd = ckpt.get("connector_state_dict")
+    if sd is None:
+        print("Checkpoint has no connector_state_dict")
+        return False
+    missing, unexpected = state.connector.load_state_dict(sd, strict=False)
+    if missing:
+        print(f"WARNING: missing keys ({len(missing)}): {missing[:5]}…")
+    if unexpected:
+        print(f"WARNING: unexpected keys ({len(unexpected)}): {unexpected[:5]}…")
+    stage = ckpt.get("stage", "unknown")
+    print(f"Loaded connector from {ckpt_path} (stage={stage})")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="pure-ella: Gemma -> SD training")
@@ -1256,8 +1277,22 @@ def main():
     parser.add_argument(
         "--config", dest="config_flag",
         help="Path to JSON config file (alternate flag)")
+    parser.add_argument(
+        "--phases", type=str, default="pretrain,ella,sara",
+        help="Comma-separated phases to run: pretrain,ella,sara (default: all)")
+    parser.add_argument(
+        "--resume-ckpt", type=str, default="",
+        help="Path to connector checkpoint to load before first phase")
     args = parser.parse_args()
     config_path = args.config_flag or args.config
+
+    phases_requested = set(p.strip().lower() for p in args.phases.split(",") if p.strip())
+    valid_phases = {"pretrain", "ella", "sara"}
+    unknown = phases_requested - valid_phases
+    if unknown:
+        print(f"ERROR: unknown phases: {unknown}. Valid: {valid_phases}")
+        sys.exit(1)
+    print(f"Phases: {sorted(phases_requested)}")
 
     cfg = TrainConfig.from_json(config_path)
     seed_everything(cfg.base_seed)
@@ -1323,14 +1358,28 @@ def main():
     else:
         print("Non-overfit run: generic validation prompts active")
 
-    run_clip_pretrain(state)
-    print_final_summary("clip_pretrain")
+    # ── resume / phase selection ──
+    resume_path = args.resume_ckpt or cfg.init_connector_ckpt_path
+    if "pretrain" not in phases_requested:
+        if resume_path:
+            if not _load_connector_checkpoint(state, resume_path):
+                print("ERROR: failed to load resume checkpoint, aborting")
+                sys.exit(1)
+        else:
+            print("WARNING: skipping pretrain with no resume checkpoint — "
+                  "connector weights are freshly initialized")
+    else:
+        if resume_path:
+            print("NOTE: --resume-ckpt ignored because pretrain is in the phase list")
 
-    run_ella_training(state)
-    print_final_summary("ella_frozen_unet")
+    run_clip_pretrain(state) if "pretrain" in phases_requested else print("pretrain SKIPPED")
+    print_final_summary("clip_pretrain") if "pretrain" in phases_requested else None
 
-    run_sara_training(state)
-    print_final_summary("sara_attn2_kv")
+    run_ella_training(state) if "ella" in phases_requested else print("ella SKIPPED")
+    print_final_summary("ella_frozen_unet") if "ella" in phases_requested else None
+
+    run_sara_training(state) if "sara" in phases_requested else print("sara SKIPPED")
+    print_final_summary("sara_attn2_kv") if "sara" in phases_requested else None
 
     run_validation_grids(state)
     run_complex_prompt_checks(state)
