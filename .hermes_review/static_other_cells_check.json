@@ -1,0 +1,14 @@
+{
+  "sha256": "e0109764e69c4f7a11d9d902acb84b249e531878371498f85271b1e226666ed1",
+  "compile_issues": [],
+  "default_eval_name_issues": [],
+  "quality_order_fixed": true,
+  "dependency_order": {
+    "quality_after_generation": true,
+    "quality_after_dataset": true,
+    "pretrain_after_quality": true,
+    "connector_after_config": true,
+    "reload_after_connector_factory": true
+  },
+  "pass": true
+}

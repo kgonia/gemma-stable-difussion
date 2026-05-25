@@ -1,0 +1,39 @@
+{
+  "sha256": "e0109764e69c4f7a11d9d902acb84b249e531878371498f85271b1e226666ed1",
+  "cells": 34,
+  "code_cells": 23,
+  "compile_issues": [],
+  "quality_after_validation_order": true,
+  "positions": {
+    "VALIDATION_EVERY_OPT_STEPS": [
+      48,
+      59,
+      70,
+      81,
+      87,
+      92
+    ],
+    "QUALITY_EVERY_OPT_STEPS": [
+      87,
+      92
+    ],
+    "RUN_IMAGE_QUALITY_METRICS": [
+      88,
+      223
+    ],
+    "CONNECTOR_TYPE": [
+      111,
+      223
+    ],
+    "RECURSIVE_Y_STEPS": [
+      119,
+      223
+    ],
+    "TRM_OUTER_STEPS": [
+      121,
+      223
+    ]
+  },
+  "outputs_present": 0,
+  "pass": true
+}

@@ -1,0 +1,20 @@
+{
+  "notebook": "/home/krz/PycharmProjects/gemma-stable-difussion/gemma3_sd_pure_ella_colab.ipynb",
+  "sha256": "e275ceac295e2d2276f801809f615a60522dc0e3bedbe822c5a8bbc30abe6590",
+  "cells": 34,
+  "code_cells": 23,
+  "compile_issues": [],
+  "embedded_newline_issues": [],
+  "checks": {
+    "patch1_teacher_delta_on": true,
+    "patch1_gate_minus5": true,
+    "patch1_warmstart_warning": true,
+    "patch2_quality_metrics": true,
+    "patch2_integrated": true,
+    "patch3_factory": true,
+    "patch4_recursive_y": true,
+    "patch5_trm_yz": true,
+    "outputs_cleared": true
+  },
+  "pass": true
+}

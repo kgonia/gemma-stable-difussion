@@ -1,0 +1,5 @@
+Notebook: gemma3_sd_pure_ella_colab.ipynb
+SHA256: 97422639766379da7dfd042a70ed9e01e50dd3bf0c9c46c0d7eab116ba871a8e
+Rerun-safety fix: helper function defaults no longer capture config globals at definition time.
+Patched cells: 15 (diagnostics helpers), 19 (generation helpers).
+Expected remaining parse exception: shell/magic cell only.

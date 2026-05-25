@@ -1,0 +1,105 @@
+
+TASK: Socratic review of whether to run full finetune on whole UNet after weak improvement from ~6k-step/sample-scale run.
+NOTEBOOK: /home/krz/PycharmProjects/gemma-stable-difussion/gemma3_sd_colab.ipynb
+SHA256: 5edbd642ebe396c22197f9d9a57b113cc2d3d7ff12b1682987c84a28670ddf6a
+CELLS: 35; code=21; code cells with outputs=16
+
+CURRENT SOURCE CONFIG ASSIGNMENTS:
+RUN_MODE = "full_train"
+CONDITIONING_ARCH = "adapter_then_ella"
+RUN_ADAPTER_STAGE = CONDITIONING_ARCH in {"gemma_clip_semantic_adapter", "adapter_then_ella"}
+RUN_ELLA_STAGE = CONDITIONING_ARCH in {"ella_gemma_connector", "adapter_then_ella"}
+MAX_SAMPLES_WARMUP = 64
+TRAIN_BATCH_SIZE = 4
+FULLRANK_EPOCHS = 40
+GRADIENT_ACCUMULATION_STEPS = 4
+PHASE_A_MAX_OPT_STEPS = 300
+SEMANTIC_MAX_OPT_STEPS = 200000 if RUN_MODE == "full_train" else 500
+RUN_LONG_TOKEN_PHASE = False
+RUN_SARA_PHASE = False
+LONG_CONTEXT_TOTAL_TOKENS = 128
+
+IMPORTANT SOURCE/OUTPUT MISMATCH:
+- Current source config has CONDITIONING_ARCH = "adapter_then_ella" and therefore RUN_ELLA_STAGE should be True.
+- Saved outputs are internally inconsistent/stale: cell 15 says CONDITIONING_ARCH="ella_gemma_connector" skipping dual surgery; cell 16 says skipping connector from an older guard; cell 17 instantiates semantic adapter; phase A output is semantic-adapter-only.
+- Therefore the ipynb is not a clean single executed run transcript. Treat visual/numeric evidence as mixed unless rerun from top.
+
+KEY OUTPUT EVIDENCE:
+CELL 15 EXEC 9 OUTPUT:
+CONDITIONING_ARCH = "ella_gemma_connector": skipping DualNativeAttention surgery.
+CELL 16 EXEC 10 OUTPUT:
+Skipping GemmaTimestepSemanticConnector (CONDITIONING_ARCH != ella_gemma_connector)
+CELL 17 EXEC 11 OUTPUT:
+Instantiating GemmaToClipSemanticAdapter and running smoke test...
+Semantic adapter smoke test PASS. Shape: torch.Size([2, 77, 768]). Params: 29,560,320 trainable / 29,560,320 total
+CELL 18 EXEC 12 OUTPUT:
+✓ Semantic adapter frozen-UNet smoke test OK
+=== Mandatory pre-training diagnostics ===
+[clip_only_teacher] 0 vs 1: relative diff = 0.028278
+[clip_only_teacher] 0 vs 2: relative diff = 0.027467
+[clip_only_teacher] 0 vs 3: relative diff = 0.025837
+[clip_only_teacher] 0 vs 4: relative diff = 0.039202
+[clip_only_teacher] 1 vs 2: relative diff = 0.024742
+[clip_only_teacher] 1 vs 3: relative diff = 0.021176
+[clip_only_teacher] 1 vs 4: relative diff = 0.037719
+[clip_only_teacher] 2 vs 3: relative diff = 0.020964
+[clip_only_teacher] 2 vs 4: relative diff = 0.032231
+[clip_only_teacher] 3 vs 4: relative diff = 0.034114
+Skipping Gemma layer 20: out of range for 19 hidden_states entries
+Gemma layer   4: mean pairwise cos=0.9827, token_var=0.1499
+Gemma layer   8: mean pairwise cos=0.9965, token_var=0.0311
+Gemma layer  12: mean pairwise cos=0.9908, token_var=0.0280
+Gemma layer  16: mean pairwise cos=0.9637, token_var=0.0761
+Gemma layer  18: mean pairwise cos=0.6932, token_var=0.1768
+Teacher text-delta norm=0.022845, relative=0.024572 for prompt: a red sports car on a city street
+Semantic-adapter/CLIP sensitivity ratio before training: 3.3396
+[pretrain] student/teacher delta cosine = -0.197466
+[pretrain] student delta norm = 15.0395, teacher delta norm = 3.9512
+[pretrain] delta norm ratio = 3.8064
+CELL 21 EXEC 13 OUTPUT:
+DataLoader phase=0 epoch=0 max_samples=8 shuffle=True seed=1234
+Dataset helper ready: warmup=100000, phaseB=100000, 7 buckets
+CELL 23 EXEC 14 OUTPUT:
+Phase A: 77-token Gemma→CLIP semantic adapter representation training only (frozen CLIP/Gemma/UNet/VAE).
+Loss: masked 77-token CLIP-state geometry only. Long tokens/SaRA are held for Phase B.
+[VRAM] phase_a_semantic_start step=0: allocated=4.76GB reserved=5.54GB peak_alloc=4.76GB peak_reserved=5.54GB
+[phase_a_semantic] plan: max_samples=100000, batch_size=128, grad_accum=1, epochs=8, steps_per_epoch=781, planned_steps=6248, cap=200000
+DataLoader phase=1 epoch=0 max_samples=100000 shuffle=True seed=2234
+semantic step 50: total=1.74045 mse=1.06855 cos=0.53000 norm=0.19411 ctr=1.79184 pooled_cos=0.68709 retrieval=0.883 collapse(pred/clip)=0.435/0.401 norm_ratio=1.304
+semantic step 500: total=1.02896 mse=0.75506 cos=0.37355 norm=0.02791 ctr=0.40074 pooled_cos=0.82948 retrieval=0.969 collapse(pred/clip)=0.320/0.343 norm_ratio=1.365
+DataLoader phase=1 epoch=1 max_samples=100000 shuffle=True seed=2235
+semantic step 1000: total=1.13507 mse=0.83237 cos=0.41332 norm=0.01932 ctr=0.45606 pooled_cos=0.73069 retrieval=0.992 collapse(pred/clip)=0.265/0.319 norm_ratio=1.310
+DataLoader phase=1 epoch=2 max_samples=100000 shuffle=True seed=2236
+semantic step 2000: total=0.75906 mse=0.58140 cos=0.28734 norm=0.01064 ctr=0.15666 pooled_cos=0.90387 retrieval=0.984 collapse(pred/clip)=0.316/0.350 norm_ratio=1.297
+DataLoader phase=1 epoch=3 max_samples=100000 shuffle=True seed=2237
+semantic step 3000: total=0.65327 mse=0.49839 cos=0.24646 norm=0.00993 ctr=0.14586 pooled_cos=0.91161 retrieval=1.000 collapse(pred/clip)=0.310/0.351 norm_ratio=1.240
+DataLoader phase=1 epoch=4 max_samples=100000 shuffle=True seed=2238
+DataLoader phase=1 epoch=5 max_samples=100000 shuffle=True seed=2239
+semantic step 4000: total=1.02439 mse=0.75657 cos=0.37561 norm=0.01328 ctr=0.38348 pooled_cos=0.81503 retrieval=1.000 collapse(pred/clip)=0.309/0.384 norm_ratio=1.351
+DataLoader phase=1 epoch=6 max_samples=100000 shuffle=True seed=2240
+semantic step 5000: total=0.95075 mse=0.71566 cos=0.35472 norm=0.01134 ctr=0.27450 pooled_cos=0.78733 retrieval=1.000 collapse(pred/clip)=0.287/0.307 norm_ratio=1.278
+semantic step 5050: total=0.96632 mse=0.72806 cos=0.36066 norm=0.01145 ctr=0.27535 pooled_cos=0.78751 retrieval=1.000 collapse(pred/clip)=0.292/0.301 norm_ratio=1.288
+DataLoader phase=1 epoch=7 max_samples=100000 shuffle=True seed=2241
+semantic step 6000: total=0.92182 mse=0.70436 cos=0.34871 norm=0.01074 ctr=0.20208 pooled_cos=0.80052 retrieval=1.000 collapse(pred/clip)=0.267/0.301 norm_ratio=1.279
+semantic step 6250: total=0.83760 mse=0.64670 cos=0.32027 norm=0.01011 ctr=0.14118 pooled_cos=0.82136 retrieval=1.000 collapse(pred/clip)=0.263/0.311 norm_ratio=1.234
+[VRAM] phase_a_semantic_end step=6256: allocated=5.15GB reserved=15.87GB peak_alloc=10.87GB peak_reserved=15.87GB
+Phase A semantic adapter complete: steps=6256, best_loss=0.5089319944381714, final_loss=0.8506631851196289, elapsed=2h 06m 14s
+=== Post-training semantic adapter diagnostics ===
+[post_semantic] student/teacher delta cosine = 0.146140
+[post_semantic] student delta norm = 18.2348, teacher delta norm = 3.2846
+[post_semantic] delta norm ratio = 5.5517
+Semantic-adapter post-train sensitivity: 0.114853
+Phase A complete. Next: optional LoRA/to_out continuation.
+CELL 24 EXEC 15 OUTPUT:
+Skipping dual-native LoRA wrapping because CONDITIONING_ARCH=gemma_clip_semantic_adapter.
+CELL 26 EXEC 16 OUTPUT:
+Phase B skipped: gemma_clip_semantic_adapter uses semantic/timestep/long-token/SaRA gated cells, not dual-native LoRA continuation.
+Phase B complete. Next: validation grids, checkpoints, and reloaded-pruned final proof.
+
+INTERPRETATION HINTS:
+- Phase A logged: max_samples=100000, batch_size=128, grad_accum=1, epochs=8, steps_per_epoch=781, planned_steps=6248, cap=200000. So despite high cap, actual optimizer steps were ~6256.
+- Training geometry loss improved early but final batch loss ~0.8507, best ~0.5089; not monotonically improving.
+- Post semantic diagnostics: delta cosine improved from -0.197 to +0.146 but remains weak; student delta norm grew from 15.0 to 18.2 while teacher delta norm ~3.28, norm ratio worsened from 3.8 to 5.55.
+- Retrieval/pooled_cos looked good, but text-delta alignment is weak and over-amplified.
+- No clean embedded visual evidence is available in notebook JSON from generated grids, or at least review cannot see it directly.
+- Whole-UNet dense finetune would violate prior preference unless gated; existing plan prefers Phase A-only clean ablation, explicit 77-token alignment gates, or sparse SaRA attn2.to_k/to_v after connector/adaptor proof.

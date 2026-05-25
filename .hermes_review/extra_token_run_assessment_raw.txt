@@ -1,0 +1,305 @@
+### CELL 2
+Mounted at /content/drive
+Artifacts: /content/drive/MyDrive/gemma3-sd-pure-ella
+
+### CELL 3
+[2K     [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m41.7/41.7 kB[0m [31m4.7 MB/s[0m eta [36m0:00:00[0m
+[2K     [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m52.8/52.8 kB[0m [31m5.6 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m354.7/354.7 kB[0m [31m34.4 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m11.2/11.2 MB[0m [31m133.7 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m3.2/3.2 MB[0m [31m117.5 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m434.8/434.8 kB[0m [31m46.2 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m529.0/529.0 kB[0m [31m51.9 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m44.8/44.8 kB[0m [31m5.7 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m27.3/27.3 MB[0m [31m81.7 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m8.8/8.8 MB[0m [31m129.2 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m566.4/566.4 kB[0m [31m52.0 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m48.9/48.9 MB[0m [31m50.5 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m3.1/3.1 MB[0m [31m122.7 MB/s[0m eta [36m0:00:00[0m
+[?25hSaRA import PASS
+
+### CELL 4
+Torch: 2.10.0+cu128 CUDA: 12.8
+GPU: NVIDIA L4
+Transformers: 4.54.1
+Diffusers: 0.32.1
+
+### CELL 5
+HF_TOKEN loaded
+wandb key loaded
+
+### CELL 7
+{
+  "EXPERIMENT_STAGE": "stage2_long_context_no_sara",
+  "RUN_MODE": "short_train",
+  "RUN_CLIP_ALIGNMENT_PRETRAIN": true,
+  "USE_CLIP_TEACHER_DELTA": true,
+  "CONTEXT_TOKENS": 128,
+  "CLIP_ANCHOR_TOKENS": 77,
+  "RUN_SARA_PHASE": false,
+  "RUN_RELOADED_LONG_PROOF": true,
+  "SARA_SCOPE": "attn2_kv_sparse"
+}
+
+### CELL 7
+/usr/local/lib/python3.12/dist-packages/notebook/notebookapp.py:191: SyntaxWarning: invalid escape sequence '\/'
+  | |_| | '_ \/ _` / _` |  _/ -_)
+[34m[1mwandb[0m: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+[34m[1mwandb[0m: Currently logged in as: [33mmistic-jedi[0m to [32mhttps://api.wandb.ai[0m. Use [1m`wandb login --relogin`[0m to force relogin
+
+### CELL 7
+<IPython.core.display.HTML object>
+
+### CELL 7
+<IPython.core.display.HTML object>
+Tracking run with wandb version 0.27.0
+### CELL 7
+<IPython.core.display.HTML object>
+Run data is saved locally in <code>/content/wandb/run-20260520_193525-u1g7nte7</code>
+### CELL 7
+<IPython.core.display.HTML object>
+Syncing run <strong><a href='https://wandb.ai/mistic-jedi/gemma3-sd-pure-ella/runs/u1g7nte7' target="_blank">pure-ella-stage2_long_context_no_sara-short_train-L128</a></strong> to <a href='https://wandb.ai/mistic-jedi/gemma3-sd-pure-ella' target="_blank">Weights & Biases</a> (<a href='https://wandb.me/developer-guide' target="_blank">docs</a>)<br>
+### CELL 7
+<IPython.core.display.HTML object>
+ View project at <a href='https://wandb.ai/mistic-jedi/gemma3-sd-pure-ella' target="_blank">https://wandb.ai/mistic-jedi/gemma3-sd-pure-ella</a>
+### CELL 7
+<IPython.core.display.HTML object>
+ View run at <a href='https://wandb.ai/mistic-jedi/gemma3-sd-pure-ella/runs/u1g7nte7' target="_blank">https://wandb.ai/mistic-jedi/gemma3-sd-pure-ella/runs/u1g7nte7</a>
+### CELL 9
+Loading Gemma: google/gemma-3-270m-it
+
+### CELL 9
+tokenizer_config.json: 0.00B [00:00, ?B/s]
+### CELL 9
+tokenizer.model:   0%|          | 0.00/4.69M [00:00<?, ?B/s]
+### CELL 9
+tokenizer.json:   0%|          | 0.00/33.4M [00:00<?, ?B/s]
+### CELL 9
+added_tokens.json:   0%|          | 0.00/35.0 [00:00<?, ?B/s]
+### CELL 9
+special_tokens_map.json:   0%|          | 0.00/662 [00:00<?, ?B/s]
+### CELL 9
+chat_template.jinja: 0.00B [00:00, ?B/s]
+### CELL 9
+config.json: 0.00B [00:00, ?B/s]
+### CELL 9
+model.safetensors:   0%|          | 0.00/536M [00:00<?, ?B/s]
+### CELL 9
+generation_config.json:   0%|          | 0.00/173 [00:00<?, ?B/s]
+### CELL 9
+Gemma hidden_size: 640
+Gemma dtype: torch.bfloat16
+
+### CELL 10
+Loading CLIP teacher: openai/clip-vit-large-patch14
+
+### CELL 10
+tokenizer_config.json:   0%|          | 0.00/905 [00:00<?, ?B/s]
+### CELL 10
+vocab.json: 0.00B [00:00, ?B/s]
+### CELL 10
+merges.txt: 0.00B [00:00, ?B/s]
+### CELL 10
+special_tokens_map.json:   0%|          | 0.00/389 [00:00<?, ?B/s]
+### CELL 10
+tokenizer.json: 0.00B [00:00, ?B/s]
+### CELL 10
+config.json: 0.00B [00:00, ?B/s]
+### CELL 10
+model.safetensors:   0%|          | 0.00/1.71G [00:00<?, ?B/s]
+### CELL 10
+CLIP loaded as teacher/diagnostic only
+
+### CELL 11
+Loading SD checkpoint: /content/drive/MyDrive/model/stylejourney_v10.safetensors
+
+### CELL 11
+Fetching 11 files:   0%|          | 0/11 [00:00<?, ?it/s]
+### CELL 11
+special_tokens_map.json:   0%|          | 0.00/472 [00:00<?, ?B/s]
+### CELL 11
+config.json:   0%|          | 0.00/617 [00:00<?, ?B/s]
+### CELL 11
+preprocessor_config.json:   0%|          | 0.00/342 [00:00<?, ?B/s]
+### CELL 11
+config.json: 0.00B [00:00, ?B/s]
+### CELL 11
+scheduler_config.json:   0%|          | 0.00/308 [00:00<?, ?B/s]
+### CELL 11
+model_index.json:   0%|          | 0.00/541 [00:00<?, ?B/s]
+### CELL 11
+merges.txt: 0.00B [00:00, ?B/s]
+### CELL 11
+tokenizer_config.json:   0%|          | 0.00/806 [00:00<?, ?B/s]
+### CELL 11
+vocab.json: 0.00B [00:00, ?B/s]
+### CELL 11
+config.json:   0%|          | 0.00/547 [00:00<?, ?B/s]
+### CELL 11
+config.json:   0%|          | 0.00/743 [00:00<?, ?B/s]
+### CELL 11
+Loading pipeline components...:   0%|          | 0/6 [00:00<?, ?it/s]
+### CELL 11
+Some weights of the model checkpoint were not used when initializing CLIPTextModel: 
+ ['text_model.embeddings.position_ids']
+In this conversion only the non-EMA weights are extracted. If you want to instead extract the EMA weights (usually better for inference), please make sure to add the `--extract_ema` flag.
+
+### CELL 11
+UNet gradient checkpointing: ON
+UNet dtype: torch.float32
+UNet cross_attention_dim: 768
+No UNet surgery. Original cross-attn stays intact.
+
+### CELL 14
+Connector PASS: output=(2, 128, 768), params=39,932,929
+extra_token_gate: 0.006692850962281227
+
+### CELL 17
+Non-overfit run: generic validation prompts active
+
+### CELL 21
+[clip_pretrain] max_samples/epoch=6,000 batch=4 epochs=1
+[clip_pretrain] steps_per_epoch≈1,500 uncapped≈1,500 effective≈1,500 image_exposures≈6,000
+[vram:clip_pretrain_start] step=0 alloc=4.76GB reserved=4.88GB peak=4.76GB
+
+### CELL 21
+README.md: 0.00B [00:00, ?B/s]
+### CELL 21
+Resolving data files:   0%|          | 0/48 [00:00<?, ?it/s]
+### CELL 21
+DataLoader phase=10 epoch=0 max_samples=6000 batch=4 shuffle=True seed=11234
+
+### CELL 21
+CLIP-pretrain 1/1: 0it [00:00, ?it/s]
+### CELL 21
+pretrain step 50: total=1.91084 mse=1.31498 cos=0.64471 pooled_cos=0.60266 norm_ratio=0.949
+pretrain step 100: total=1.76775 mse=1.27625 cos=0.62640 pooled_cos=0.59053 norm_ratio=0.965
+pretrain step 150: total=1.63942 mse=1.23714 cos=0.60708 pooled_cos=0.65056 norm_ratio=0.941
+pretrain step 200: total=1.63885 mse=1.21390 cos=0.59554 pooled_cos=0.70767 norm_ratio=0.983
+pretrain step 250: total=1.48190 mse=1.15465 cos=0.56747 pooled_cos=0.71129 norm_ratio=0.948
+pretrain step 300: total=1.53164 mse=1.18505 cos=0.58245 pooled_cos=0.69619 norm_ratio=0.997
+pretrain step 350: total=1.60740 mse=1.23024 cos=0.60361 pooled_cos=0.67606 norm_ratio=0.990
+pretrain step 400: total=1.56400 mse=1.21161 cos=0.59498 pooled_cos=0.71101 norm_ratio=0.958
+pretrain step 450: total=1.49172 mse=1.14442 cos=0.56206 pooled_cos=0.75845 norm_ratio=0.973
+pretrain step 500: total=1.49624 mse=1.15182 cos=0.56544 pooled_cos=0.73062 norm_ratio=0.992
+pretrain step 550: total=1.45246 mse=1.12868 cos=0.55438 pooled_cos=0.75464 norm_ratio=0.969
+pretrain step 600: total=1.37685 mse=1.09000 cos=0.53542 pooled_cos=0.76595 norm_ratio=0.994
+pretrain step 650: total=1.38904 mse=1.09417 cos=0.53738 pooled_cos=0.70554 norm_ratio=0.973
+pretrain step 700: total=1.33992 mse=1.04424 cos=0.51292 pooled_cos=0.72161 norm_ratio=0.975
+pretrain step 750: total=1.28742 mse=1.00417 cos=0.49384 pooled_cos=0.77859 norm_ratio=0.980
+pretrain step 800: total=1.14525 mse=0.90240 cos=0.44392 pooled_cos=0.78434 norm_ratio=0.947
+pretrain step 850: total=1.24346 mse=0.98308 cos=0.48347 pooled_cos=0.77080 norm_ratio=0.963
+pretrain step 900: total=1.12342 mse=0.88741 cos=0.43650 pooled_cos=0.80566 norm_ratio=0.980
+pretrain step 950: total=1.17861 mse=0.92102 cos=0.45323 pooled_cos=0.78615 norm_ratio=0.968
+pretrain step 1000: total=1.22886 mse=0.96878 cos=0.47636 pooled_cos=0.78227 norm_ratio=0.993
+pretrain step 1050: total=1.23212 mse=0.96959 cos=0.47647 pooled_cos=0.76206 norm_ratio=0.956
+pretrain step 1100: total=1.18581 mse=0.92311 cos=0.45391 pooled_cos=0.78839 norm_ratio=0.986
+pretrain step 1150: total=1.06688 mse=0.84365 cos=0.41489 pooled_cos=0.84050 norm_ratio=0.997
+pretrain step 1200: total=1.11546 mse=0.88734 cos=0.43639 pooled_cos=0.82248 norm_ratio=0.978
+pretrain step 1250: total=1.15402 mse=0.88538 cos=0.43533 pooled_cos=0.80877 norm_ratio=0.985
+pretrain step 1300: total=1.20602 mse=0.95118 cos=0.46735 pooled_cos=0.78222 norm_ratio=0.983
+pretrain step 1350: total=1.13202 mse=0.89534 cos=0.44030 pooled_cos=0.80601 norm_ratio=0.987
+pretrain step 1400: total=1.21693 mse=0.96679 cos=0.47514 pooled_cos=0.79937 norm_ratio=0.980
+pretrain step 1450: total=1.16512 mse=0.91754 cos=0.45128 pooled_cos=0.78665 norm_ratio=0.976
+pretrain step 1500: total=1.03984 mse=0.82780 cos=0.40734 pooled_cos=0.81277 norm_ratio=0.992
+Stopping CLIP pretrain at step cap 1500
+[vram:clip_pretrain_end] step=1500 alloc=5.25GB reserved=6.14GB peak=5.82GB
+CLIP pretrain done: steps=1500 best=0.9834862351417542 elapsed=3.6m
+[post_clip_pretrain] 0 vs 1: rel_diff=0.080752
+[post_clip_pretrain] 0 vs 2: rel_diff=0.086215
+[post_clip_pretrain] 1 vs 2: rel_diff=0.054435
+[post_clip_pretrain] delta_cos=0.129431 norm_ratio=3.004856
+
+### CELL 23
+Phase 1 forward mode: paired_cfg_teacher
+[ella_frozen_unet] max_samples/epoch=6,000 batch=4 epochs=1
+[ella_frozen_unet] steps_per_epoch≈1,500 uncapped≈1,500 effective≈1,500 image_exposures≈6,000
+[vram:ella_start] step=0 alloc=4.93GB reserved=6.14GB peak=4.93GB
+
+### CELL 23
+Resolving data files:   0%|          | 0/48 [00:00<?, ?it/s]
+### CELL 23
+DataLoader phase=20 epoch=0 max_samples=6000 batch=4 shuffle=True seed=21234
+
+### CELL 23
+ELLA 1/1: 0it [00:00, ?it/s]
+### CELL 23
+ella step 250: loss=0.17912 diff=0.12142 teacher=0.00106 delta=0.00180 anchor=1.10757
+[ella_step_000250] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_000250] delta_cos=0.246367 norm_ratio=2.309300
+[ella_step_000250] base_rms=0.989730, extra_gate=0.006673, extra_rms=0.006537, extra_abs_mean=0.004967, extra_to_base_ratio=0.006605, prefix_drift_rel=0.024732, attention_recording_supported=1.000000, attn_prefix_share=0.796623, attn_extra_share=0.203377, attn_extra_ratio=0.203377, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.013296, rel_diff_full_vs_zeroextra_cond=0.000369, rel_diff_77_vs_full_delta=0.562116, rel_diff_full_vs_zeroextra_delta=0.010668
+[ella_step_000250_suffix] token boundary report: {'len_a': 88, 'len_b': 92, 'shared_prefix_tokens': 66, 'same_first_anchor_tokens': False, 'first_diff_index': 66, 'suffix_a_after_anchor': ' basket, and a tiny owl perched on the handlebar.', 'suffix_b_after_anchor': ' spilling from the basket, and a silver pocket watch hanging from the handlebar.'}
+[ella_step_000250_suffix] same_first_anchor_tokens=0.000000, first_diff_index=66.000000, shared_prefix_tokens=66.000000, suffix_swap_rel_diff_full_cond=0.006942, suffix_swap_rel_diff_trunc77_cond=0.010080, suffix_swap_rel_diff_full_delta=0.227851, suffix_swap_rel_diff_trunc77_delta=0.230549, short_vs_full_a_cond=0.023538, short_vs_full_b_cond=0.023402
+ella step 500: loss=0.12690 diff=0.07413 teacher=0.00062 delta=0.00038 anchor=1.04162
+[ella_step_000500] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_000500] delta_cos=0.732530 norm_ratio=2.188455
+[ella_step_000500] base_rms=0.994465, extra_gate=0.006722, extra_rms=0.006604, extra_abs_mean=0.005036, extra_to_base_ratio=0.006641, prefix_drift_rel=0.032580, attention_recording_supported=1.000000, attn_prefix_share=0.857441, attn_extra_share=0.142559, attn_extra_ratio=0.142559, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.011483, rel_diff_full_vs_zeroextra_cond=0.000306, rel_diff_77_vs_full_delta=0.322782, rel_diff_full_vs_zeroextra_delta=0.009804
+[ella_step_000500_suffix] token boundary report: {'len_a': 88, 'len_b': 92, 'shared_prefix_tokens': 66, 'same_first_anchor_tokens': False, 'first_diff_index': 66, 'suffix_a_after_anchor': ' basket, and a tiny owl perched on the handlebar.', 'suffix_b_after_anchor': ' spilling from the basket, and a silver pocket watch hanging from the handlebar.'}
+[ella_step_000500_suffix] same_first_anchor_tokens=0.000000, first_diff_index=66.000000, shared_prefix_tokens=66.000000, suffix_swap_rel_diff_full_cond=0.004499, suffix_swap_rel_diff_trunc77_cond=0.005727, suffix_swap_rel_diff_full_delta=0.121992, suffix_swap_rel_diff_trunc77_delta=0.157295, short_vs_full_a_cond=0.019158, short_vs_full_b_cond=0.019004
+ella step 750: loss=0.10258 diff=0.04813 teacher=0.00166 delta=0.00157 anchor=1.04113
+[ella_step_000750] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_000750] delta_cos=0.549591 norm_ratio=1.993649
+[ella_step_000750] base_rms=0.998992, extra_gate=0.006782, extra_rms=0.006711, extra_abs_mean=0.005098, extra_to_base_ratio=0.006718, prefix_drift_rel=0.032635, attention_recording_supported=1.000000, attn_prefix_share=0.874434, attn_extra_share=0.125566, attn_extra_ratio=0.125566, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.008148, rel_diff_full_vs_zeroextra_cond=0.000283, rel_diff_77_vs_full_delta=0.193063, rel_diff_full_vs_zeroextra_delta=0.007644
+[ella_step_000750_suffix] token boundary report: {'len_a': 88, 'len_b': 92, 'shared_prefix_tokens': 66, 'same_first_anchor_tokens': False, 'first_diff_index': 66, 'suffix_a_after_anchor': ' basket, and a tiny owl perched on the handlebar.', 'suffix_b_after_anchor': ' spilling from the basket, and a silver pocket watch hanging from the handlebar.'}
+[ella_step_000750_suffix] same_first_anchor_tokens=0.000000, first_diff_index=66.000000, shared_prefix_tokens=66.000000, suffix_swap_rel_diff_full_cond=0.005687, suffix_swap_rel_diff_trunc77_cond=0.007613, suffix_swap_rel_diff_full_delta=0.175082, suffix_swap_rel_diff_trunc77_delta=0.237744, short_vs_full_a_cond=0.027850, short_vs_full_b_cond=0.027148
+ella step 1000: loss=0.09942 diff=0.04864 teacher=0.00056 delta=0.00047 anchor=1.00049
+[ella_step_001000] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_001000] delta_cos=0.539159 norm_ratio=1.280607
+[ella_step_001000] base_rms=0.993618, extra_gate=0.006856, extra_rms=0.006746, extra_abs_mean=0.005198, extra_to_base_ratio=0.006789, prefix_drift_rel=0.035301, attention_recording_supported=1.000000, attn_prefix_share=0.888647, attn_extra_share=0.111353, attn_extra_ratio=0.111353, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.011683, rel_diff_full_vs_zeroextra_cond=0.000200, rel_diff_77_vs_full_delta=0.331128, rel_diff_full_vs_zeroextra_delta=0.007112
+[ella_step_001000_suffix] token boundary report: {'len_a': 88, 'len_b': 92, 'shared_prefix_tokens': 66, 'same_first_anchor_tokens': False, 'first_diff_index': 66, 'suffix_a_after_anchor': ' basket, and a tiny owl perched on the handlebar.', 'suffix_b_after_anchor': ' spilling from the basket, and a silver pocket watch hanging from the handlebar.'}
+[ella_step_001000_suffix] same_first_anchor_tokens=0.000000, first_diff_index=66.000000, shared_prefix_tokens=66.000000, suffix_swap_rel_diff_full_cond=0.006552, suffix_swap_rel_diff_trunc77_cond=0.007980, suffix_swap_rel_diff_full_delta=0.223087, suffix_swap_rel_diff_trunc77_delta=0.256338, short_vs_full_a_cond=0.015930, short_vs_full_b_cond=0.014066
+ella step 1250: loss=0.18284 diff=0.13048 teacher=0.00124 delta=0.00088 anchor=1.01698
+[ella_step_001250] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_001250] delta_cos=0.488162 norm_ratio=1.929277
+[ella_step_001250] base_rms=0.996981, extra_gate=0.006935, extra_rms=0.006894, extra_abs_mean=0.005311, extra_to_base_ratio=0.006914, prefix_drift_rel=0.040302, attention_recording_supported=1.000000, attn_prefix_share=0.871178, attn_extra_share=0.128822, attn_extra_ratio=0.128822, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.007140, rel_diff_full_vs_zeroextra_cond=0.000229, rel_diff_77_vs_full_delta=0.278117, rel_diff_full_vs_zeroextra_delta=0.009136
+[ella_step_001250_suffix] token boundary report: {'len_a': 88, 'len_b': 92, 'shared_prefix_tokens': 66, 'same_first_anchor_tokens': False, 'first_diff_index': 66, 'suffix_a_after_anchor': ' basket, and a tiny owl perched on the handlebar.', 'suffix_b_after_anchor': ' spilling from the basket, and a silver pocket watch hanging from the handlebar.'}
+[ella_step_001250_suffix] same_first_anchor_tokens=0.000000, first_diff_index=66.000000, shared_prefix_tokens=66.000000, suffix_swap_rel_diff_full_cond=0.005629, suffix_swap_rel_diff_trunc77_cond=0.006772, suffix_swap_rel_diff_full_delta=0.206401, suffix_swap_rel_diff_trunc77_delta=0.233146, short_vs_full_a_cond=0.019155, short_vs_full_b_cond=0.017804
+ella step 1500: loss=0.10082 diff=0.04978 teacher=0.00071 delta=0.00080 anchor=0.99777
+[ella_step_001500] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_001500] delta_cos=0.613814 norm_ratio=1.793778
+[ella_step_001500] base_rms=1.004649, extra_gate=0.007022, extra_rms=0.006962, extra_abs_mean=0.005360, extra_to_base_ratio=0.006930, prefix_drift_rel=0.038734, attention_recording_supported=1.000000, attn_prefix_share=0.866811, attn_extra_share=0.133189, attn_extra_ratio=0.133189, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.009140, rel_diff_full_vs_zeroextra_cond=0.000291, rel_diff_77_vs_full_delta=0.193869, rel_diff_full_vs_zeroextra_delta=0.007282
+[ella_step_001500_suffix] token boundary report: {'len_a': 88, 'len_b': 92, 'shared_prefix_tokens': 66, 'same_first_anchor_tokens': False, 'first_diff_index': 66, 'suffix_a_after_anchor': ' basket, and a tiny owl perched on the handlebar.', 'suffix_b_after_anchor': ' spilling from the basket, and a silver pocket watch hanging from the handlebar.'}
+[ella_step_001500_suffix] same_first_anchor_tokens=0.000000, first_diff_index=66.000000, shared_prefix_tokens=66.000000, suffix_swap_rel_diff_full_cond=0.005478, suffix_swap_rel_diff_trunc77_cond=0.007771, suffix_swap_rel_diff_full_delta=0.124142, suffix_swap_rel_diff_trunc77_delta=0.153501, short_vs_full_a_cond=0.021979, short_vs_full_b_cond=0.021752
+Stopping ELLA at step cap 1500
+[vram:ella_end] step=1500 alloc=5.28GB reserved=10.00GB peak=9.17GB
+ELLA frozen-UNet done: steps=1500 best=0.056743402034044266 elapsed=76.0m
+
+### CELL 25
+SaRA phase disabled
+
+### CELL 26
+Sparse SaRA phase skipped
+
+### CELL 28
+Prompt sensitivity:
+[final_ella] 0 vs 1: rel_diff=0.046016
+[final_ella] 0 vs 2: rel_diff=0.029088
+[final_ella] 1 vs 2: rel_diff=0.051378
+[final_ella] delta_cos=0.621200 norm_ratio=1.359308
+[final_overfit] no OVERFIT_EVAL_BATCH; skipped
+[final_long_context_ablation] base_rms=1.004649, extra_gate=0.007022, extra_rms=0.006962, extra_abs_mean=0.005360, extra_to_base_ratio=0.006930, prefix_drift_rel=0.038734, attention_recording_supported=1.000000, attn_prefix_share=0.862271, attn_extra_share=0.137729, attn_extra_ratio=0.137729, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.008664, rel_diff_full_vs_zeroextra_cond=0.000244, rel_diff_77_vs_full_delta=0.261122, rel_diff_full_vs_zeroextra_delta=0.007455
+[final_long_context_suffix0] token boundary report: {'len_a': 88, 'len_b': 92, 'shared_prefix_tokens': 66, 'same_first_anchor_tokens': False, 'first_diff_index': 66, 'suffix_a_after_anchor': ' basket, and a tiny owl perched on the handlebar.', 'suffix_b_after_anchor': ' spilling from the basket, and a silver pocket watch hanging from the handlebar.'}
+[final_long_context_suffix0] same_first_anchor_tokens=0.000000, first_diff_index=66.000000, shared_prefix_tokens=66.000000, suffix_swap_rel_diff_full_cond=0.006649, suffix_swap_rel_diff_trunc77_cond=0.007768, suffix_swap_rel_diff_full_delta=0.245918, suffix_swap_rel_diff_trunc77_delta=0.260069, short_vs_full_a_cond=0.020783, short_vs_full_b_cond=0.018821
+Generating ELLA: a cat sitting on a windowsill looking outside
+
+### CELL 28
+NameError: name 'VAL_STEPS' is not defined
+[0;31m---------------------------------------------------------------------------[0m[0;31mNameError[0m                                 Traceback (most recent call last)[0;32m/tmp/ipykernel_15432/394194744.py[0m in [0;36m<cell line: 0>[0;34m()[0m
+[1;32m     15[0m     [0;32mfor[0m [0mptxt[0m [0;32min[0m [0mVAL_PROMPTS[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[1;32m     16[0m         [0mprint[0m[0;34m([0m[0;34m"Generating ELLA:"[0m[0;34m,[0m [0mptxt[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0;32m---> 17[0;31m         [0mella_imgs[0m[0;34m.[0m[0mappend[0m[0;34m([0m[0mgenerate_ella[0m[0;34m([0m[0mptxt[0m[0;34m,[0m [0mcontext_tokens[0m[0;34m=[0m[0mCONTEXT_TOKENS[0m[0;34m)[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m     18[0m         [0mlabels[0m[0;34m.[0m[0mappend[0m[0;34m([0m[0;34mf"ELLA L{CONTEXT_TOKENS}: {ptxt[:40]}"[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[1;32m     19[0m     [0msave_validation_grid[0m[0;34m([0m[0mella_imgs[0m[0;34m,[0m [0mlabels[0m[0;34m,[0m [0;34mf"{DRIVE_OUT}/validation_ella_L{CONTEXT_TOKENS}.png"[0m[0;34m,[0m [0;34mf"ELLA L{CONTEXT_TOKENS}"[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0;32m/usr/local/lib/python3.12/dist-packages/torch/utils/_contextlib.py[0m in [0;36mdecorate_context[0;34m(*args, **kwargs)[0m
+[1;32m    122[0m         [0;31m# pyrefly: ignore [bad-context-manager][0m[0;34m[0m[0;34m[0m[0m
+[1;32m    123[0m         [0;32mwith[0m [0mctx_factory[0m[0;34m([0m[0;34m)[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[0;32m--> 124[0;31m             [0;32mreturn[0m [0mfunc[0m[0;34m([0m[0;34m*[0m[0margs[0m[0;34m,[0m [0;34m**[0m[0mkwargs[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m    125[0m [0;34m[0m[0m
+[1;32m    126[0m     [0;32mreturn[0m [0mdecorate_context[0m[0;34m[0m[0;34m[0m[0m
+[0;32m/tmp/ipykernel_15432/2634322463.py[0m in [0;36mgenerate_ella[0;34m(prompt, steps, guidance, seed, negative_prompt, width, height, context_tokens)[0m
+[1;32m     31[0m [0;34m@[0m[0mtorch[0m[0;34m.[0m[0mno_grad[0m[0;34m([0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[1;32m     32[0m [0;32mdef[0m [0mgenerate_ella[0m[0;34m([0m[0mprompt[0m[0;34m,[0m [0msteps[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m [0mguidance[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m [0mseed[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m [0mnegative_prompt[0m[0;34m=[0m[0;34m""[0m[0;34m,[0m [0mwidth[0m[0;34m=[0m[0;36m512[0m[0;34m,[0m [0mheight[0m[0;34m=[0m[0;36m512[0m[0;34m,[0m [0mcontext_tokens[0m[0;34m=[0m[0;32mNone[0m[0;34m)[0m[0;34m:[0m[0;34m[0m[0;34m[0m[0m
+[0;32m---> 33[0;31m     [0msteps[0m [0;34m=[0m [0mVAL_STEPS[0m [0;32mif[0m [0msteps[0m [0;32mis[0m [0;32mNone[0m [0;32melse[0m [0mint[0m[0;34m([0m[0msteps[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0m[1;32m     34[0m     [0mguidance[0m [0;34m=[0m [0mVAL_GUIDANCE[0m [0;32mif[0m [0mguidance[0m [0;32mis[0m [0;32mNone[0m [0;32melse[0m [0mfloat[0m[0;34m([0m[0mguidance[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[1;32m     35[0m     [0mseed[0m [0;34m=[0m [0mVAL_SEED[0m [0;32mif[0m [0mseed[0m [0;32mis[0m [0;32mNone[0m [0;32melse[0m [0mint[0m[0;34m([0m[0mseed[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0;31mNameError[0m: name 'VAL_STEPS' is not defined

@@ -1,0 +1,20 @@
+{
+  "notebook": "/home/krz/PycharmProjects/gemma-stable-difussion/gemma3_sd_pure_ella_colab.ipynb",
+  "sha256": "e0109764e69c4f7a11d9d902acb84b249e531878371498f85271b1e226666ed1",
+  "fix": "Moved image-quality metric config after RUN_MODE branch so QUALITY_EVERY_OPT_STEPS is assigned after VALIDATION_EVERY_OPT_STEPS.",
+  "backup": "/home/krz/PycharmProjects/gemma-stable-difussion/gemma3_sd_pure_ella_colab.pre_fix_quality_order_e275ceac295e.ipynb",
+  "local_checks": {
+    "json_load": true,
+    "compile": "PASS",
+    "config_dummy_execution": "PASS",
+    "quality_order": "PASS",
+    "function_default_arg_order": "PASS",
+    "dependency_order": "PASS",
+    "outputs_cleared": true
+  },
+  "subagent_check": "ATTEMPTED_TIMEOUT_600S_NO_RESULT",
+  "local_check_files": [
+    "/home/krz/PycharmProjects/gemma-stable-difussion/.hermes_review/fix_quality_order_local_check.json",
+    "/home/krz/PycharmProjects/gemma-stable-difussion/.hermes_review/static_other_cells_check.json"
+  ]
+}

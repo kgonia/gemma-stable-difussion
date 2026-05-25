@@ -1,0 +1,404 @@
+
+===== CELL 2 STREAM stdout =====
+Mounted at /content/drive
+Artifacts: /content/drive/MyDrive/gemma3-sd-pure-ella
+
+
+
+===== CELL 3 STREAM stdout =====
+[2K     [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m41.7/41.7 kB[0m [31m4.1 MB/s[0m eta [36m0:00:00[0m
+[2K     [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m52.8/52.8 kB[0m [31m5.7 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m354.7/354.7 kB[0m [31m32.7 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m11.2/11.2 MB[0m [31m142.2 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m3.2/3.2 MB[0m [31m115.1 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m434.8/434.8 kB[0m [31m42.9 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m529.0/529.0 kB[0m [31m36.3 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m44.8/44.8 kB[0m [31m5.3 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m27.3/27.3 MB[0m [31m87.8 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m8.8/8.8 MB[0m [31m143.1 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m566.4/566.4 kB[0m [31m45.0 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m48.9/48.9 MB[0m [31m52.3 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m3.1/3.1 MB[0m [31m110.4 MB/s[0m eta [36m0:00:00[0m
+[?25hSaRA import PASS
+
+
+
+===== CELL 4 STREAM stdout =====
+Torch: 2.10.0+cu128 CUDA: 12.8
+GPU: NVIDIA L4
+Transformers: 4.54.1
+Diffusers: 0.32.1
+
+
+
+===== CELL 5 STREAM stdout =====
+HF_TOKEN loaded
+wandb key loaded
+
+
+
+===== CELL 7 STREAM stdout =====
+{
+  "EXPERIMENT_STAGE": "stage2_long_context_no_sara",
+  "RUN_MODE": "short_train",
+  "RUN_CLIP_ALIGNMENT_PRETRAIN": true,
+  "USE_CLIP_TEACHER_DELTA": false,
+  "CONTEXT_TOKENS": 128,
+  "CLIP_ANCHOR_TOKENS": 77,
+  "RUN_SARA_PHASE": false,
+  "RUN_RELOADED_LONG_PROOF": true,
+  "SARA_SCOPE": "attn2_kv_sparse",
+  "CONNECTOR_EXTRA_GATE_INIT": -3.0,
+  "PHASE1_SEMANTIC_ANCHOR_WEIGHT": 0.0
+}
+
+
+
+===== CELL 7 STREAM stderr =====
+/usr/local/lib/python3.12/dist-packages/notebook/notebookapp.py:191: SyntaxWarning: invalid escape sequence '\/'
+  | |_| | '_ \/ _` / _` |  _/ -_)
+[34m[1mwandb[0m: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+[34m[1mwandb[0m: Currently logged in as: [33mmistic-jedi[0m to [32mhttps://api.wandb.ai[0m. Use [1m`wandb login --relogin`[0m to force relogin
+
+
+
+===== CELL 7 DISPLAY TEXT =====
+<IPython.core.display.HTML object>
+
+
+===== CELL 7 DISPLAY TEXT =====
+<IPython.core.display.HTML object>
+
+
+===== CELL 7 DISPLAY TEXT =====
+<IPython.core.display.HTML object>
+
+
+===== CELL 7 DISPLAY TEXT =====
+<IPython.core.display.HTML object>
+
+
+===== CELL 7 DISPLAY TEXT =====
+<IPython.core.display.HTML object>
+
+
+===== CELL 7 DISPLAY TEXT =====
+<IPython.core.display.HTML object>
+
+
+===== CELL 9 STREAM stdout =====
+Loading Gemma: google/gemma-3-270m-it
+
+
+
+===== CELL 9 DISPLAY TEXT =====
+tokenizer_config.json: 0.00B [00:00, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+tokenizer.model:   0%|          | 0.00/4.69M [00:00<?, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+tokenizer.json:   0%|          | 0.00/33.4M [00:00<?, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+added_tokens.json:   0%|          | 0.00/35.0 [00:00<?, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+special_tokens_map.json:   0%|          | 0.00/662 [00:00<?, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+chat_template.jinja: 0.00B [00:00, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+config.json: 0.00B [00:00, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+model.safetensors:   0%|          | 0.00/536M [00:00<?, ?B/s]
+
+
+===== CELL 9 DISPLAY TEXT =====
+generation_config.json:   0%|          | 0.00/173 [00:00<?, ?B/s]
+
+
+===== CELL 9 STREAM stdout =====
+Gemma hidden_size: 640
+Gemma dtype: torch.bfloat16
+
+
+
+===== CELL 10 STREAM stdout =====
+Loading CLIP teacher: openai/clip-vit-large-patch14
+
+
+
+===== CELL 10 DISPLAY TEXT =====
+tokenizer_config.json:   0%|          | 0.00/905 [00:00<?, ?B/s]
+
+
+===== CELL 10 DISPLAY TEXT =====
+vocab.json: 0.00B [00:00, ?B/s]
+
+
+===== CELL 10 DISPLAY TEXT =====
+merges.txt: 0.00B [00:00, ?B/s]
+
+
+===== CELL 10 DISPLAY TEXT =====
+special_tokens_map.json:   0%|          | 0.00/389 [00:00<?, ?B/s]
+
+
+===== CELL 10 DISPLAY TEXT =====
+tokenizer.json: 0.00B [00:00, ?B/s]
+
+
+===== CELL 10 DISPLAY TEXT =====
+config.json: 0.00B [00:00, ?B/s]
+
+
+===== CELL 10 DISPLAY TEXT =====
+model.safetensors:   0%|          | 0.00/1.71G [00:00<?, ?B/s]
+
+
+===== CELL 10 STREAM stdout =====
+CLIP loaded as teacher/diagnostic only
+
+
+
+===== CELL 11 STREAM stdout =====
+Loading SD checkpoint: /content/drive/MyDrive/model/stylejourney_v10.safetensors
+
+
+
+===== CELL 11 DISPLAY TEXT =====
+Fetching 11 files:   0%|          | 0/11 [00:00<?, ?it/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+config.json:   0%|          | 0.00/617 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+scheduler_config.json:   0%|          | 0.00/308 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+config.json: 0.00B [00:00, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+preprocessor_config.json:   0%|          | 0.00/342 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+merges.txt: 0.00B [00:00, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+model_index.json:   0%|          | 0.00/541 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+special_tokens_map.json:   0%|          | 0.00/472 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+tokenizer_config.json:   0%|          | 0.00/806 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+vocab.json: 0.00B [00:00, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+config.json:   0%|          | 0.00/743 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+config.json:   0%|          | 0.00/547 [00:00<?, ?B/s]
+
+
+===== CELL 11 DISPLAY TEXT =====
+Loading pipeline components...:   0%|          | 0/6 [00:00<?, ?it/s]
+
+
+===== CELL 11 STREAM stderr =====
+Some weights of the model checkpoint were not used when initializing CLIPTextModel: 
+ ['text_model.embeddings.position_ids']
+In this conversion only the non-EMA weights are extracted. If you want to instead extract the EMA weights (usually better for inference), please make sure to add the `--extract_ema` flag.
+
+
+
+===== CELL 11 STREAM stdout =====
+UNet gradient checkpointing: ON
+UNet dtype: torch.float32
+UNet cross_attention_dim: 768
+No UNet surgery. Original cross-attn stays intact.
+
+
+
+===== CELL 14 STREAM stdout =====
+Connector warm-start skipped: INIT_CONNECTOR_CKPT_PATH is empty
+Connector PASS: output=(2, 128, 768), params=39,932,929
+extra_token_gate: 0.04742587357759476
+
+
+
+===== CELL 15 STREAM stdout =====
+[suffix_boundary:object_after_anchor_counterfactual] {'len_a': 135, 'len_b': 135, 'shared_prefix_tokens': 125, 'same_first_anchor_tokens': True, 'first_diff_index': 125, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'passes_long_context_suffix_gate': True, 'required_first_diff_range': '[77, 128)'}
+[suffix_boundary:action_after_anchor_counterfactual] {'len_a': 136, 'len_b': 136, 'shared_prefix_tokens': 122, 'same_first_anchor_tokens': True, 'first_diff_index': 122, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'passes_long_context_suffix_gate': True, 'required_first_diff_range': '[77, 128)'}
+
+
+
+===== CELL 17 STREAM stdout =====
+Non-overfit run: generic validation prompts active
+
+
+
+===== CELL 21 STREAM stdout =====
+[clip_pretrain] max_samples/epoch=6,000 batch=4 epochs=1
+[clip_pretrain] steps_per_epoch≈1,500 uncapped≈1,500 effective≈1,500 image_exposures≈6,000
+[vram:clip_pretrain_start] step=0 alloc=4.76GB reserved=4.88GB peak=4.76GB
+
+
+
+===== CELL 21 DISPLAY TEXT =====
+README.md: 0.00B [00:00, ?B/s]
+
+
+===== CELL 21 DISPLAY TEXT =====
+Resolving data files:   0%|          | 0/48 [00:00<?, ?it/s]
+
+
+===== CELL 21 STREAM stdout =====
+DataLoader phase=10 epoch=0 max_samples=6000 batch=4 shuffle=True seed=11234
+
+
+
+===== CELL 21 DISPLAY TEXT =====
+CLIP-pretrain 1/1: 0it [00:00, ?it/s]
+
+
+===== CELL 21 STREAM stdout =====
+pretrain step 50: total=1.91084 mse=1.31498 cos=0.64471 pooled_cos=0.60266 norm_ratio=0.949
+pretrain step 100: total=1.76775 mse=1.27625 cos=0.62640 pooled_cos=0.59053 norm_ratio=0.965
+pretrain step 150: total=1.63942 mse=1.23714 cos=0.60708 pooled_cos=0.65056 norm_ratio=0.941
+pretrain step 200: total=1.63885 mse=1.21390 cos=0.59554 pooled_cos=0.70767 norm_ratio=0.983
+pretrain step 250: total=1.48190 mse=1.15465 cos=0.56747 pooled_cos=0.71129 norm_ratio=0.948
+pretrain step 300: total=1.53164 mse=1.18505 cos=0.58245 pooled_cos=0.69619 norm_ratio=0.997
+pretrain step 350: total=1.60740 mse=1.23024 cos=0.60361 pooled_cos=0.67606 norm_ratio=0.990
+pretrain step 400: total=1.56400 mse=1.21161 cos=0.59498 pooled_cos=0.71101 norm_ratio=0.958
+pretrain step 450: total=1.49172 mse=1.14442 cos=0.56206 pooled_cos=0.75845 norm_ratio=0.973
+pretrain step 500: total=1.49624 mse=1.15182 cos=0.56544 pooled_cos=0.73062 norm_ratio=0.992
+pretrain step 550: total=1.45246 mse=1.12868 cos=0.55438 pooled_cos=0.75464 norm_ratio=0.969
+pretrain step 600: total=1.37685 mse=1.09000 cos=0.53542 pooled_cos=0.76595 norm_ratio=0.994
+pretrain step 650: total=1.38904 mse=1.09417 cos=0.53738 pooled_cos=0.70554 norm_ratio=0.973
+pretrain step 700: total=1.33992 mse=1.04424 cos=0.51292 pooled_cos=0.72161 norm_ratio=0.975
+pretrain step 750: total=1.28742 mse=1.00417 cos=0.49384 pooled_cos=0.77859 norm_ratio=0.980
+pretrain step 800: total=1.14525 mse=0.90240 cos=0.44392 pooled_cos=0.78434 norm_ratio=0.947
+pretrain step 850: total=1.24346 mse=0.98308 cos=0.48347 pooled_cos=0.77080 norm_ratio=0.963
+pretrain step 900: total=1.12342 mse=0.88741 cos=0.43650 pooled_cos=0.80566 norm_ratio=0.980
+pretrain step 950: total=1.17861 mse=0.92102 cos=0.45323 pooled_cos=0.78615 norm_ratio=0.968
+pretrain step 1000: total=1.22886 mse=0.96878 cos=0.47636 pooled_cos=0.78227 norm_ratio=0.993
+pretrain step 1050: total=1.23212 mse=0.96959 cos=0.47647 pooled_cos=0.76206 norm_ratio=0.956
+pretrain step 1100: total=1.18581 mse=0.92311 cos=0.45391 pooled_cos=0.78839 norm_ratio=0.986
+pretrain step 1150: total=1.06688 mse=0.84365 cos=0.41489 pooled_cos=0.84050 norm_ratio=0.997
+pretrain step 1200: total=1.11546 mse=0.88734 cos=0.43639 pooled_cos=0.82248 norm_ratio=0.978
+pretrain step 1250: total=1.15402 mse=0.88538 cos=0.43533 pooled_cos=0.80877 norm_ratio=0.985
+pretrain step 1300: total=1.20602 mse=0.95118 cos=0.46735 pooled_cos=0.78222 norm_ratio=0.983
+pretrain step 1350: total=1.13202 mse=0.89534 cos=0.44030 pooled_cos=0.80601 norm_ratio=0.987
+pretrain step 1400: total=1.21693 mse=0.96679 cos=0.47514 pooled_cos=0.79937 norm_ratio=0.980
+pretrain step 1450: total=1.16512 mse=0.91754 cos=0.45128 pooled_cos=0.78665 norm_ratio=0.976
+pretrain step 1500: total=1.03984 mse=0.82780 cos=0.40734 pooled_cos=0.81277 norm_ratio=0.992
+Stopping CLIP pretrain at step cap 1500
+[vram:clip_pretrain_end] step=1500 alloc=5.25GB reserved=6.14GB peak=5.82GB
+CLIP pretrain done: steps=1500 best=0.9834862351417542 elapsed=3.7m
+[post_clip_pretrain] 0 vs 1: rel_diff=0.081638
+[post_clip_pretrain] 0 vs 2: rel_diff=0.087595
+[post_clip_pretrain] 1 vs 2: rel_diff=0.054584
+[post_clip_pretrain] delta_cos=0.124859 norm_ratio=2.956061
+
+
+
+===== CELL 23 STREAM stdout =====
+Phase 1 forward mode: conditional_only
+[ella_frozen_unet] max_samples/epoch=6,000 batch=4 epochs=1
+[ella_frozen_unet] steps_per_epoch≈1,500 uncapped≈1,500 effective≈1,500 image_exposures≈6,000
+[vram:ella_start] step=0 alloc=4.93GB reserved=6.14GB peak=4.93GB
+
+
+
+===== CELL 23 DISPLAY TEXT =====
+Resolving data files:   0%|          | 0/48 [00:00<?, ?it/s]
+
+
+===== CELL 23 STREAM stdout =====
+DataLoader phase=20 epoch=0 max_samples=6000 batch=4 shuffle=True seed=21234
+
+
+
+===== CELL 23 DISPLAY TEXT =====
+ELLA 1/1: 0it [00:00, ?it/s]
+
+
+===== CELL 23 STREAM stdout =====
+ella step 250: loss=0.12111 diff=0.12111 teacher=0.00000 delta=0.00000 anchor=0.00000
+[ella_step_000250] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_000250] delta_cos=0.096736 norm_ratio=1.105847
+[ella_step_000250] base_rms=0.972686, extra_gate=0.047409, extra_rms=0.045563, extra_abs_mean=0.033317, extra_to_base_ratio=0.046842, prefix_drift_rel=0.020405, attention_recording_supported=1.000000, attn_prefix_share=0.654596, attn_extra_share=0.345404, attn_extra_ratio=0.345404, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.026104, rel_diff_full_vs_zeroextra_cond=0.003013, rel_diff_77_vs_full_delta=0.579837, rel_diff_full_vs_zeroextra_delta=0.105978
+[ella_step_000250_suffix] token boundary report: {'len_a': 135, 'len_b': 135, 'shared_prefix_tokens': 125, 'same_first_anchor_tokens': True, 'first_diff_index': 125, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants'}
+[ella_step_000250_suffix] same_first_anchor_tokens=1.000000, first_diff_index=125.000000, shared_prefix_tokens=125.000000, suffix_swap_rel_diff_full_cond=0.009741, suffix_swap_rel_diff_trunc77_cond=0.023475, suffix_swap_rel_diff_full_delta=0.267018, suffix_swap_rel_diff_trunc77_delta=0.397868, short_vs_full_a_cond=0.039025, short_vs_full_b_cond=0.038377
+ella step 500: loss=0.07394 diff=0.07394 teacher=0.00000 delta=0.00000 anchor=0.00000
+[ella_step_000500] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_000500] delta_cos=0.544808 norm_ratio=1.443094
+[ella_step_000500] base_rms=1.001149, extra_gate=0.047256, extra_rms=0.047261, extra_abs_mean=0.032152, extra_to_base_ratio=0.047207, prefix_drift_rel=0.012097, attention_recording_supported=1.000000, attn_prefix_share=0.574365, attn_extra_share=0.425635, attn_extra_ratio=0.425635, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.029198, rel_diff_full_vs_zeroextra_cond=0.004665, rel_diff_77_vs_full_delta=0.709930, rel_diff_full_vs_zeroextra_delta=0.125949
+[ella_step_000500_suffix] token boundary report: {'len_a': 135, 'len_b': 135, 'shared_prefix_tokens': 125, 'same_first_anchor_tokens': True, 'first_diff_index': 125, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants'}
+[ella_step_000500_suffix] same_first_anchor_tokens=1.000000, first_diff_index=125.000000, shared_prefix_tokens=125.000000, suffix_swap_rel_diff_full_cond=0.008145, suffix_swap_rel_diff_trunc77_cond=0.019898, suffix_swap_rel_diff_full_delta=0.297167, suffix_swap_rel_diff_trunc77_delta=0.345096, short_vs_full_a_cond=0.054152, short_vs_full_b_cond=0.056605
+ella step 750: loss=0.04803 diff=0.04803 teacher=0.00000 delta=0.00000 anchor=0.00000
+[ella_step_000750] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_000750] delta_cos=0.391604 norm_ratio=2.180555
+[ella_step_000750] base_rms=0.999973, extra_gate=0.047190, extra_rms=0.047147, extra_abs_mean=0.033591, extra_to_base_ratio=0.047149, prefix_drift_rel=0.013663, attention_recording_supported=1.000000, attn_prefix_share=0.632449, attn_extra_share=0.367551, attn_extra_ratio=0.367551, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.033536, rel_diff_full_vs_zeroextra_cond=0.003172, rel_diff_77_vs_full_delta=0.742309, rel_diff_full_vs_zeroextra_delta=0.090581
+[ella_step_000750_suffix] token boundary report: {'len_a': 135, 'len_b': 135, 'shared_prefix_tokens': 125, 'same_first_anchor_tokens': True, 'first_diff_index': 125, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants'}
+[ella_step_000750_suffix] same_first_anchor_tokens=1.000000, first_diff_index=125.000000, shared_prefix_tokens=125.000000, suffix_swap_rel_diff_full_cond=0.011797, suffix_swap_rel_diff_trunc77_cond=0.019708, suffix_swap_rel_diff_full_delta=0.286335, suffix_swap_rel_diff_trunc77_delta=0.380912, short_vs_full_a_cond=0.040218, short_vs_full_b_cond=0.043499
+ella step 1000: loss=0.04825 diff=0.04825 teacher=0.00000 delta=0.00000 anchor=0.00000
+[ella_step_001000] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_001000] delta_cos=0.187587 norm_ratio=1.585115
+[ella_step_001000] base_rms=1.014904, extra_gate=0.047073, extra_rms=0.047798, extra_abs_mean=0.034386, extra_to_base_ratio=0.047096, prefix_drift_rel=0.012854, attention_recording_supported=1.000000, attn_prefix_share=0.582139, attn_extra_share=0.417861, attn_extra_ratio=0.417861, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.036657, rel_diff_full_vs_zeroextra_cond=0.004623, rel_diff_77_vs_full_delta=0.631143, rel_diff_full_vs_zeroextra_delta=0.129847
+[ella_step_001000_suffix] token boundary report: {'len_a': 135, 'len_b': 135, 'shared_prefix_tokens': 125, 'same_first_anchor_tokens': True, 'first_diff_index': 125, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants'}
+[ella_step_001000_suffix] same_first_anchor_tokens=1.000000, first_diff_index=125.000000, shared_prefix_tokens=125.000000, suffix_swap_rel_diff_full_cond=0.016063, suffix_swap_rel_diff_trunc77_cond=0.023330, suffix_swap_rel_diff_full_delta=0.396571, suffix_swap_rel_diff_trunc77_delta=0.466715, short_vs_full_a_cond=0.041222, short_vs_full_b_cond=0.042670
+ella step 1250: loss=0.12970 diff=0.12970 teacher=0.00000 delta=0.00000 anchor=0.00000
+[ella_step_001250] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_001250] delta_cos=0.344593 norm_ratio=1.708130
+[ella_step_001250] base_rms=1.005523, extra_gate=0.046990, extra_rms=0.047256, extra_abs_mean=0.034792, extra_to_base_ratio=0.046997, prefix_drift_rel=0.017374, attention_recording_supported=1.000000, attn_prefix_share=0.608710, attn_extra_share=0.391290, attn_extra_ratio=0.391290, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.029322, rel_diff_full_vs_zeroextra_cond=0.004306, rel_diff_77_vs_full_delta=0.709850, rel_diff_full_vs_zeroextra_delta=0.117701
+[ella_step_001250_suffix] token boundary report: {'len_a': 135, 'len_b': 135, 'shared_prefix_tokens': 125, 'same_first_anchor_tokens': True, 'first_diff_index': 125, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants'}
+[ella_step_001250_suffix] same_first_anchor_tokens=1.000000, first_diff_index=125.000000, shared_prefix_tokens=125.000000, suffix_swap_rel_diff_full_cond=0.020024, suffix_swap_rel_diff_trunc77_cond=0.025140, suffix_swap_rel_diff_full_delta=0.585860, suffix_swap_rel_diff_trunc77_delta=0.481195, short_vs_full_a_cond=0.034957, short_vs_full_b_cond=0.038925
+ella step 1500: loss=0.04950 diff=0.04950 teacher=0.00000 delta=0.00000 anchor=0.00000
+[ella_step_001500] no OVERFIT_EVAL_BATCH; skipped
+[ella_step_001500] delta_cos=0.540692 norm_ratio=2.605714
+[ella_step_001500] base_rms=1.007628, extra_gate=0.046851, extra_rms=0.047170, extra_abs_mean=0.034185, extra_to_base_ratio=0.046813, prefix_drift_rel=0.022503, attention_recording_supported=1.000000, attn_prefix_share=0.582075, attn_extra_share=0.417925, attn_extra_ratio=0.417925, attn_layers_recorded=16.000000, rel_diff_77_vs_full_cond=0.034977, rel_diff_full_vs_zeroextra_cond=0.007274, rel_diff_77_vs_full_delta=0.655504, rel_diff_full_vs_zeroextra_delta=0.174076
+[ella_step_001500_suffix] token boundary report: {'len_a': 135, 'len_b': 135, 'shared_prefix_tokens': 125, 'same_first_anchor_tokens': True, 'first_diff_index': 125, 'suffix_a_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants', 'suffix_b_after_anchor': ' wooden table, linen cloth, ceramic bowl, glass vase, folded paper, small candle, soft window light, distant plants'}
+[ella_step_001500_suffix] same_first_anchor_tokens=1.000000, first_diff_index=125.000000, shared_prefix_tokens=125.000000, suffix_swap_rel_diff_full_cond=0.017436, suffix_swap_rel_diff_trunc77_cond=0.026012, suffix_swap_rel_diff_full_delta=0.263703, suffix_swap_rel_diff_trunc77_delta=0.365095, short_vs_full_a_cond=0.065527, short_vs_full_b_cond=0.068088
+Stopping ELLA at step cap 1500
+[vram:ella_end] step=1500 alloc=5.27GB reserved=9.37GB peak=7.96GB
+ELLA frozen-UNet done: steps=1500 best=0.00461743026971817 elapsed=37.0m
+
+
+
+===== CELL 25 STREAM stdout =====
+SaRA phase disabled
+
+
+
+===== CELL 26 STREAM stdout =====
+Sparse SaRA phase skipped
+
+
+
+===== CELL 28 DISPLAY TEXT =====
+Output hidden; open in https://colab.research.google.com to view.
