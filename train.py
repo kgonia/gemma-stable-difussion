@@ -41,6 +41,13 @@ from transformers import AutoModel, AutoTokenizer, CLIPTextModel, CLIPTokenizer
 from pure_ella.config import TrainConfig, resolve_sd_checkpoint, seed_everything
 from pure_ella.connector import build_connector
 from pure_ella.dataset import make_streaming_dataloader
+from pure_ella.sara import (
+    build_sara_attn2_kv_sparse_masks,
+    install_sara_gradient_masks,
+    remove_sara_gradient_masks,
+    collect_sara_sparse_values,
+    load_sara_sparse_values,
+)
 from pure_ella.diagnostics import (
     FINAL_SUMMARIES,
     ClipGeometryLoss,
@@ -103,6 +110,10 @@ class TrainingState:
 
     # Quality metrics
     quality_ref_cache: dict = None
+
+    # SaRA internal state
+    _sara_grad_handles: list = None
+    _sara_summary: dict = None
 
 
 @dataclass
@@ -689,14 +700,235 @@ def run_ella_training(state: TrainingState):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Sparse SaRA (stub)
+# Phase 2: Sparse SaRA attn2 K/V adaptation
 # ---------------------------------------------------------------------------
 def run_sara_training(state: TrainingState):
     cfg = state.cfg
-    if not cfg.run_sara_phase:
+    if not cfg.run_sara_phase or cfg.sara_epochs <= 0:
         print("SaRA phase disabled")
         return
-    print("SaRA training not yet implemented in script - use notebook")
+
+    # Build sparse masks on attn2 K/V weights
+    for p in state.unet.parameters():
+        p.requires_grad_(False)
+    sara_summary = build_sara_attn2_kv_sparse_masks(
+        state.unet,
+        threshold=cfg.sara_threshold,
+        max_sparse_fraction_warn=cfg.sara_max_sparse_fraction_warn,
+        max_sparse_fraction_abort=cfg.sara_max_sparse_fraction_abort,
+        target_substrings=cfg.sara_target_substrings,
+    )
+    grad_handles = install_sara_gradient_masks(state.unet)
+
+    # Connector stays trainable
+    for p in state.connector.parameters():
+        p.requires_grad_(True)
+    trainable_connector = [p for p in state.connector.parameters() if p.requires_grad]
+    trainable_unet = [p for p in state.unet.parameters() if p.requires_grad]
+    trainable_params = trainable_connector + trainable_unet
+    print(f"Trainable params in ELLA+SaRA: {sum(p.numel() for p in trainable_params):,}")
+    print(f"  connector: {sum(p.numel() for p in trainable_connector):,}")
+    print(f"  sparse UNet: {sum(p.numel() for p in trainable_unet):,}")
+
+    optimizer = torch.optim.AdamW([
+        {"params": trainable_connector, "weight_decay": 0.01},
+        {"params": trainable_unet, "weight_decay": 0.0},
+    ], lr=cfg.sara_lr, eps=1e-6)
+
+    use_teacher_delta_phase2 = bool(
+        cfg.use_clip_teacher_delta and cfg.use_clip_teacher_delta_phase2
+        and state.clip_model is not None,
+    )
+    if cfg.use_clip_teacher_delta and not use_teacher_delta_phase2:
+        print("Phase 2 CLIP teacher delta disabled to avoid moving-teacher distillation.")
+    print("Phase 2 forward mode:",
+          "paired_cfg_teacher" if use_teacher_delta_phase2 else "conditional_only")
+
+    state.connector.train()
+    state.unet.train()
+    state.vae.eval()
+    state.gemma_model.eval()
+    if state.clip_model is not None:
+        state.clip_model.eval()
+
+    plan = estimate_steps(cfg.max_samples_ella, cfg.train_batch_size,
+                          cfg.sara_epochs, cfg.sara_max_opt_steps)
+    plan.name = "ella_sara_attn2_kv"
+    plan.print()
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    log_vram("sara_start", 0, state)
+
+    opt_step = 0
+    best = None
+    stop = False
+    t0 = time.time()
+
+    for epoch in range(cfg.sara_epochs):
+        dl = make_streaming_dataloader(
+            cfg.stream_repo, phase=30, epoch=epoch,
+            max_samples=cfg.max_samples_ella,
+            batch_size=cfg.train_batch_size,
+            shuffle=cfg.shuffle_streaming,
+            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed)
+        progress = tqdm(dl, desc=f"ELLA+SaRA {epoch+1}/{cfg.sara_epochs}")
+        for batch in progress:
+            captions = _as_prompt_list(batch["caption"])
+            img = batch["image"].to(device=state.device, dtype=state.unet_dtype)
+
+            with torch.no_grad():
+                latent = (state.vae.encode(img).latent_dist.sample()
+                          * state.vae.config.scaling_factor)
+                noise = torch.randn_like(latent)
+                t = torch.randint(
+                    0, state.scheduler.config.num_train_timesteps,
+                    (latent.shape[0],), device=state.device).long()
+                noisy = state.scheduler.add_noise(latent, noise, t)
+                gh, gm = state.encode_gemma(captions)
+
+            loss_teacher = noise.new_tensor(0.0)
+            loss_delta = noise.new_tensor(0.0)
+            loss_anchor = noise.new_tensor(0.0)
+
+            if use_teacher_delta_phase2:
+                empty = [""] * len(captions)
+                with torch.no_grad():
+                    ugh, ugm = state.encode_gemma(empty)
+                noisy_pair = torch.cat([noisy, noisy], dim=0)
+                t_pair = torch.cat([t, t], dim=0)
+                g_pair = torch.cat([gh, ugh], dim=0)
+                m_pair = torch.cat([gm, ugm], dim=0)
+                ctx = state.connector(
+                    g_pair.to(dtype=state.unet_dtype), t_pair, m_pair,
+                    context_tokens=cfg.context_tokens)
+                student_pair = state.unet(
+                    noisy_pair, t_pair, encoder_hidden_states=ctx).sample
+                student_cond, student_uncond = student_pair.chunk(2)
+                loss_diff = F.mse_loss(student_cond.float(), noise.float())
+
+                with torch.no_grad():
+                    ch, cm = state.encode_clip(captions)
+                    uch, ucm = state.encode_clip(empty)
+                    clip_pair = torch.cat([ch, uch], dim=0)
+                    clip_m_pair = torch.cat([cm, ucm], dim=0)
+                    teacher_pair = state.unet(
+                        noisy_pair, t_pair,
+                        encoder_hidden_states=clip_pair.to(dtype=state.unet_dtype),
+                        encoder_attention_mask=clip_m_pair).sample.detach()
+                    teacher_cond, teacher_uncond = teacher_pair.chunk(2)
+                    teacher_delta = teacher_cond - teacher_uncond
+                student_delta = student_cond - student_uncond
+                loss_teacher = F.mse_loss(
+                    student_cond.float(), teacher_cond.float())
+                loss_delta = F.mse_loss(
+                    student_delta.float(), teacher_delta.float())
+            else:
+                ctx = state.connector(
+                    gh.to(dtype=state.unet_dtype), t, gm,
+                    context_tokens=cfg.context_tokens)
+                student_cond = state.unet(
+                    noisy, t, encoder_hidden_states=ctx).sample
+                loss_diff = F.mse_loss(student_cond.float(), noise.float())
+
+            if (cfg.phase2_semantic_anchor_weight > 0
+                    and state.clip_model is not None):
+                clip_geom = ClipGeometryLoss()
+                with torch.no_grad():
+                    ch, cm = state.encode_clip(captions)
+                pred77 = ctx[:len(captions), :cfg.clip_anchor_tokens, :]
+                loss_anchor = clip_geom(pred77, ch, cm)["total"]
+
+            loss = (cfg.lambda_diffusion * loss_diff
+                    + cfg.lambda_teacher * loss_teacher
+                    + cfg.lambda_text_delta * loss_delta
+                    + cfg.phase2_semantic_anchor_weight * loss_anchor)
+            if not torch.isfinite(loss):
+                raise RuntimeError("ELLA+SaRA loss NaN/Inf")
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_stats = connector_extra_grad_stats(state.connector)
+            nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip_norm)
+            optimizer.step()
+            opt_step += 1
+            best = (float(loss.item()) if best is None
+                    else min(best, float(loss.item())))
+
+            if opt_step % 25 == 0:
+                safe_wandb_log({
+                    "sara/step": opt_step,
+                    "sara/loss": loss.item(),
+                    "sara/loss_diff": loss_diff.item(),
+                    "sara/loss_teacher": float(loss_teacher.item()),
+                    "sara/loss_delta": float(loss_delta.item()),
+                    "sara/loss_anchor": float(loss_anchor.item()),
+                    "sara/extra_gate_grad_norm":
+                        grad_stats["extra_gate_grad_norm"]
+                        if grad_stats["extra_gate_grad_norm"] is not None
+                        else 0.0,
+                    "sara/extra_query_grad_norm":
+                        grad_stats["extra_query_grad_norm"]
+                        if grad_stats["extra_query_grad_norm"] is not None
+                        else 0.0,
+                    "sara/extra_pos_grad_norm":
+                        grad_stats["extra_pos_grad_norm"]
+                        if grad_stats["extra_pos_grad_norm"] is not None
+                        else 0.0,
+                }, wandb=state.wandb)
+
+            if (cfg.validation_every_opt_steps
+                    and opt_step % cfg.validation_every_opt_steps == 0):
+                print(f"sara step {opt_step}: loss={loss.item():.5f} "
+                      f"diff={loss_diff.item():.5f} "
+                      f"teacher={loss_teacher.item():.5f} "
+                      f"delta={loss_delta.item():.5f} "
+                      f"anchor={loss_anchor.item():.5f}")
+                fixed_overfit_loss(
+                    state, label=f"sara_step_{opt_step:06d}",
+                    wandb=state.wandb)
+                teacher_student_delta_alignment(
+                    cfg.val_prompts[0], state,
+                    label=f"sara_step_{opt_step:06d}", wandb=state.wandb)
+                if (cfg.run_long_context_diagnostics
+                        and cfg.context_tokens > cfg.clip_anchor_tokens):
+                    extra_token_ablation_metrics(
+                        cfg.val_prompts[0], state,
+                        label=f"sara_step_{opt_step:06d}",
+                        wandb=state.wandb)
+
+            progress.set_postfix(
+                {"loss": f"{loss.item():.4f}", "best": f"{best:.4f}"})
+            if (cfg.sara_max_opt_steps
+                    and opt_step >= cfg.sara_max_opt_steps):
+                stop = True
+                print("Stopping ELLA+SaRA at step cap", opt_step)
+                break
+        if stop:
+            break
+
+    elapsed_min = (time.time() - t0) / 60
+    log_vram("sara_end", opt_step, state)
+
+    sara_summary_dict = {
+        "steps": opt_step,
+        "best_loss": best or float("nan"),
+        "elapsed_min": elapsed_min,
+        "sparse_selected": sara_summary["selected"],
+        "sparse_total": sara_summary["total_target"],
+        "sparse_fraction": sara_summary["fraction"],
+    }
+    remember_final_summary(
+        "sara_attn2_kv", sara_summary_dict,
+        wandb_prefix="final/sara_attn2_kv", wandb=state.wandb)
+
+    # Store handles + summary on state for save_artifacts
+    state._sara_grad_handles = grad_handles
+    state._sara_summary = sara_summary
+
+    print(f"ELLA+SaRA done: steps={opt_step} best={best} "
+          f"elapsed={elapsed_min:.1f}m")
+    print_final_summary("sara_attn2_kv")
 
 
 # ---------------------------------------------------------------------------
@@ -779,9 +1011,26 @@ def run_save_artifacts(state: TrainingState):
         "run_config": cfg.to_dict(),
     }, path)
     print("Connector saved:", path)
+    summary = {"connector_saved": path, "context_tokens": cfg.context_tokens}
+
+    # Save SaRA sparse UNet patch if active
+    if cfg.run_sara_phase and state._sara_summary is not None:
+        sparse_values = collect_sara_sparse_values(state.unet)
+        sparse_path = f"{cfg.output_dir}/pure_ella_unet_attn2_kv_sparse_L{cfg.context_tokens}.pt"
+        torch.save({
+            "architecture": "SD UNet original graph + sparse attn2.to_k/to_v value patch",
+            "sparse_values": sparse_values,
+            "sara_sparse_summary": state._sara_summary,
+            "sd_checkpoint": cfg.sd_checkpoint,
+            "run_config": cfg.to_dict(),
+        }, sparse_path)
+        print("Sparse UNet patch saved:", sparse_path)
+        summary["unet_sparse_saved"] = sparse_path
+    else:
+        print("Sparse UNet patch skipped")
+
     remember_final_summary(
-        "save_artifacts",
-        {"connector_saved": path, "context_tokens": cfg.context_tokens},
+        "save_artifacts", summary,
         wandb_prefix="final/save_artifacts", wandb=state.wandb)
     print_final_summary("save_artifacts")
 
@@ -833,6 +1082,13 @@ def run_reload_proof(state: TrainingState):
             sd_path, subfolder="unet", torch_dtype=state.unet_dtype,
             token=os.environ.get("HF_TOKEN"),
         ).to(state.device).eval()
+
+    # Apply SaRA sparse UNet patch if saved
+    sparse_path = f"{cfg.output_dir}/pure_ella_unet_attn2_kv_sparse_L{cfg.context_tokens}.pt"
+    if cfg.run_sara_phase and os.path.exists(sparse_path):
+        sparse_ckpt = torch.load(sparse_path, map_location="cpu")
+        loaded = load_sara_sparse_values(reloaded_unet, sparse_ckpt["sparse_values"])
+        print(f"Sparse UNet patch reload PASS: {loaded:,} values")
 
     with torch.no_grad():
         gh, gm = state.encode_gemma(["a small red car", ""])
@@ -989,6 +1245,8 @@ def main():
         wandb.define_metric("pretrain/*", step_metric="pretrain/step")
         wandb.define_metric("ella/step")
         wandb.define_metric("ella/*", step_metric="ella/step")
+        wandb.define_metric("sara/step")
+        wandb.define_metric("sara/*", step_metric="sara/step")
         wandb.define_metric("diagnostics/*")
         wandb.define_metric("quality/*")
         wandb.define_metric("final/*")
@@ -1038,6 +1296,7 @@ def main():
     print_final_summary("ella_frozen_unet")
 
     run_sara_training(state)
+    print_final_summary("sara_attn2_kv")
 
     run_validation_grids(state)
     run_complex_prompt_checks(state)
