@@ -649,7 +649,7 @@ def suffix_counterfactual_sensitivity(
     cfg = state.cfg
     ctx = cfg.context_tokens
     if ctx <= cfg.clip_anchor_tokens or not cfg.suffix_counterfactual_cases:
-        return {"suffix_sensitivity": None}
+        return {"suffix_sensitivity_mean": None, "per_case": {}}
     
     connector = state.connector
     unet = state.unet

@@ -618,8 +618,9 @@ def run_ella_training(state: TrainingState):
                     and cfg.context_tokens > cfg.clip_anchor_tokens):
                 loss_suffix_cf = suffix_counterfactual_contrastive_loss(
                     state, margin=cfg.suffix_counterfactual_loss_margin)
-                if torch.isfinite(loss_suffix_cf):
-                    loss = loss + cfg.suffix_counterfactual_loss_weight * loss_suffix_cf
+                if not torch.isfinite(loss_suffix_cf):
+                    raise RuntimeError("suffix_counterfactual_contrastive_loss NaN/Inf")
+                loss = loss + cfg.suffix_counterfactual_loss_weight * loss_suffix_cf
 
             if not torch.isfinite(loss):
                 raise RuntimeError("ELLA loss NaN/Inf")
@@ -691,7 +692,7 @@ def run_ella_training(state: TrainingState):
                         safe_wandb_log({"ella/suffix_zero_delta": zd}, wandb=state.wandb)
                         if zd < 0.03:
                             print(f"⚠  LOW suffix sensitivity: "
-                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} — "
+                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} - "
                                   f"extra tokens have almost no effect on CFG delta")
                     suffix_counterfactual_sensitivity(
                         state, label=f"ella_step_{opt_step:06d}",
@@ -946,7 +947,7 @@ def run_sara_training(state: TrainingState):
                         safe_wandb_log({"sara/suffix_zero_delta": zd}, wandb=state.wandb)
                         if zd < 0.03:
                             print(f"⚠  LOW suffix sensitivity: "
-                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} — "
+                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} - "
                                   f"extra tokens have almost no effect on CFG delta")
                     suffix_counterfactual_sensitivity(
                         state, label=f"sara_step_{opt_step:06d}",
@@ -1416,7 +1417,7 @@ def main():
                 print("ERROR: failed to load resume checkpoint, aborting")
                 sys.exit(1)
         else:
-            print("WARNING: skipping pretrain with no resume checkpoint — "
+            print("WARNING: skipping pretrain with no resume checkpoint - "
                   "connector weights are freshly initialized")
     else:
         if resume_path:
