@@ -6,8 +6,9 @@
 
 ## Implementation update (2026-07-12)
 
-The supported P1 baseline is now **256 Gemma input tokens -> 77 SD1.5
-conditioning tokens**. `ella_tsc` is a fixed-query, timestep-aware resampler
+The supported P1 baseline is now **approximately 256-token Gemma captions
+(320-token safety window) -> 77 SD1.5 conditioning tokens**. `ella_tsc` is a
+fixed-query, timestep-aware resampler
 with a learned mixture of upper Gemma layers; it keeps the pretrained U-Net
 cross-attention contract intact. Direct 77 -> 256 token concatenation is not
 supported because even zero-valued extra K/V tokens perturb attention softmax
@@ -17,13 +18,18 @@ branch, not concatenation.
 Implemented Phase 0 corrections: SaRA uses `max_samples_sara`; checkpoint
 resolution checks all local fallbacks before accepting a Hugging Face ID;
 unknown JSON keys fail fast; run mode no longer overwrites explicit budgets;
-full-frame aspect-ratio buckets replace center cropping; sparse masks are bool.
+full-frame aspect-ratio buckets replace center cropping; sparse masks remain
+bool through gradient hooks. Input-side suffix diagnostics now verify that the
+counterfactual suffix begins after token 77 and is not truncated. Phase 0 uses
+the exact CLIP-visible decoded prefix; Phase 1 samples paired short/medium/long
+captions at 25/25/50 when the dataset supplies them.
 
 ## Vision
 
 Four capability pillars, in dependency order:
 
-1. **P1 — Long Gemma prompts** via the ELLA timestep-aware connector (77 → 256 tokens).
+1. **P1 — Long Gemma prompts** via the ELLA timestep-aware connector
+   (up to 320 input tokens -> 77 fixed SD1.5 conditioning tokens).
 2. **P2 — Train only undertrained weights** (SaRA sparse masks on `attn2` K/V) so new
    capability lands without destroying pretrained knowledge.
 3. **P3 — Second conditioning signal**: camera intrinsics / capture metadata alongside
@@ -42,21 +48,23 @@ guarantee and the ablation story: each pillar is exactly removable.
 
 ## Current state (what the code already does)
 
-- `train.py` runs three phases: Phase 0 CLIP-geometry pretrain of the connector
-  (`run_clip_pretrain`), Phase 1 ELLA diffusion training with frozen UNet + CLIP
-  teacher/delta distillation + optional suffix-counterfactual contrastive loss
+- `train.py` runs three phases: Phase 0 short-prefix CLIP-geometry pretrain of
+  the connector (`run_clip_pretrain`), Phase 1 standard diffusion training with
+  a frozen UNet and no suffix-divergence objective
   (`run_ella_training`), Phase 2 SaRA sparse `attn2.to_k/to_v` adaptation
   (`run_sara_training` — implemented, not a stub despite README wording).
-- Three connector variants (`ella_tsc`, `recursive_y`, `trm_yz`), all gated for length
-  extension past the 77-token CLIP anchor. `trm_yz` is the current default.
+- `ella_tsc` is the supported default. It compresses long Gemma input into 77
+  fixed queries; `recursive_y` and `trm_yz` remain experimental variants.
 - `pure_ella/sara.py` builds |w| < 1e-3 masks with warn/abort gates (2% / 5%),
   gradient hooks, and sparse save/load — the reload proof applies the sparse patch to a
   freshly loaded UNet, which is exactly the right "removable delta" design.
-- Diagnostics are strong: suffix sensitivity, extra-token ablation, teacher-student
-  delta alignment, FID/KID, reload proofs.
-- Dataset: `jackyhate/text-to-image-2M` streamed; captions from embedded JSON;
-  512×512 single bucket; `num_workers=0`.
-- `config_long_256.json` = stage3 (256 tokens, SaRA on), batch 8, StyleJourney v10.
+- Diagnostics cover input-suffix sensitivity, short-prompt teacher-student delta
+  alignment, FID/KID, and reload proofs. Output-token ablation is intentionally
+  obsolete because the connector always emits exactly 77 tokens.
+- Dataset: streamed full-frame aspect buckets with masked letterbox padding and
+  optional `caption_short`/`caption_medium`/`caption_long` variants.
+- `config_long_256.json` = connector-only long-input baseline, batch 8,
+  StyleJourney v10; SaRA is deferred to a separate stage.
 
 ---
 
@@ -85,28 +93,30 @@ suggestions in [`REVIEW.md`](REVIEW.md)), ordered by importance:
    (`sara.py:54`), duplicating every target tensor in fp32; store `bool` and cast in the
    hook. `unet_dtype` is hardcoded `float32` in `main()` — consider a config field
    (bf16 autocast) before the SaRA phase grows.
-5. **Silent-config hazards (document or assert):** JSON keys that don't match a
-   `TrainConfig` field are silently dropped (typos vanish); `context_tokens` in JSON is
-   ignored (derived from `experiment_stage`/`long_context_target` — `config_long_256.json`
-   says 77 but runs at 256, which is intended but reads as a lie); `run_mode:
-   overfit_train`/`diagnostic` clobber JSON-provided budgets in `__post_init__`.
+5. **Silent-config hazards (fixed):** unknown JSON keys fail fast;
+   `context_tokens` is validated as the fixed 77-token SD1.5 output contract; run
+   modes no longer overwrite explicit sample or optimizer-step budgets.
 
 **Exit criteria:** SaRA phase respects its own sample budget; one shared training-step
 function; short_train smoke run reproduces current metrics within noise.
 
 ---
 
-## P1 — Long-context ELLA at 256 tokens (in flight — finish first)
+## P1 — Long-input ELLA with a fixed SD1.5 contract (in flight — finish first)
 
 This is the baseline every later pillar is measured against.
 
-- Run `config_long_256.json` to completion (pretrain → ELLA → SaRA) with the suffix
-  counterfactual loss enabled if `suffix_zero_delta` stays < 0.03 without it.
-- **Exit criteria:** `rel_diff_full_vs_zeroextra_delta` ≥ 0.03 sustained; suffix
-  counterfactual A/B grids visibly differ; FID/KID within tolerance of the 77-token
-  stage; reload proof passes.
-- **Deliverable:** `pure_ella_connector_L256.pt` + sparse UNet patch — frozen as the
-  reference checkpoint ("B0") for all subsequent ablations.
+- Train `config_long_256.json` with standard diffusion MSE after the short-prefix
+  CLIP-geometry pretrain. Keep Phase 1 CLIP teacher/delta losses disabled: CLIP cannot
+  observe suffix tokens beyond its 77-token window and would reward suffix blindness.
+- Use paired caption variants when available: 25% short, 25% medium, 50% long. Target
+  approximately 256 Gemma tokens while retaining the configured 320-token safety
+  window; fail instead of silently truncating longer samples.
+- **Exit criteria:** suffix A/B counterfactual sensitivity is non-trivial and sustained;
+  compositional long-prompt grids visibly bind suffix attributes; short-prompt FID/KID
+  stays within tolerance of the CLIP baseline; connector reload proof passes.
+- **Deliverable:** a Gemma-320-input/SD1.5-77-output connector checkpoint, frozen as
+  the reference checkpoint ("B0") for subsequent SaRA and metadata ablations.
 
 ## P2 — Undertrained-weight training (SaRA), widened deliberately
 

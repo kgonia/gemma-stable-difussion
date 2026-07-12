@@ -60,17 +60,13 @@ from pure_ella.diagnostics import (
     connector_prompt_sensitivity,
     teacher_student_delta_alignment,
     fixed_overfit_loss,
-    extra_token_ablation_metrics,
     save_validation_grid,
     _image_collapse_stats,
     _pil_to_uint8_tensor,
     _log_metrics,
     _rel_diff,
     _to_float_maybe,
-    connector_extra_grad_stats,
     suffix_counterfactual_sensitivity,
-    summarize_context_tokens,
-    zero_extra_tokens,
     generate_case_image,
     save_complex_case_grid,
     save_suffix_counterfactual_grids,
@@ -134,8 +130,11 @@ class StagePlan:
 
 
 def estimate_steps(max_samples: int, batch_size: int, epochs: int,
-                   cap: Optional[int]) -> StagePlan:
-    steps_per_epoch = max(1, math.ceil(int(max_samples) / int(batch_size)))
+                   cap: Optional[int], drop_last: bool = False) -> StagePlan:
+    if drop_last:
+        steps_per_epoch = int(max_samples) // int(batch_size)
+    else:
+        steps_per_epoch = math.ceil(int(max_samples) / int(batch_size))
     uncapped = steps_per_epoch * int(epochs)
     effective = min(uncapped, int(cap)) if cap is not None else uncapped
     return StagePlan(
@@ -167,6 +166,54 @@ def apply_conditioning_dropout(captions, probability: float):
     dropped = torch.rand(len(captions)) < probability
     return ["" if bool(drop) else caption
             for caption, drop in zip(captions, dropped)]
+
+
+def select_training_captions(batch: dict, cfg: TrainConfig):
+    """Sample paired caption lengths, falling back to the long caption."""
+    long_captions = _as_prompt_list(batch["caption"])
+    medium_captions = _as_prompt_list(
+        batch.get("caption_medium", [""] * len(long_captions)))
+    short_captions = _as_prompt_list(
+        batch.get("caption_short", [""] * len(long_captions)))
+    if not hasattr(cfg, "_caption_availability_logged"):
+        short_count = sum(bool(caption) for caption in short_captions)
+        medium_count = sum(bool(caption) for caption in medium_captions)
+        print(
+            f"Caption variants in first batch: short={short_count}/"
+            f"{len(long_captions)} medium={medium_count}/{len(long_captions)} "
+            f"long={len(long_captions)}/{len(long_captions)}"
+        )
+        if short_count == 0 and medium_count == 0:
+            print("WARNING: caption curriculum unavailable; using long captions only")
+        cfg._caption_availability_logged = True
+    choices = torch.rand(len(long_captions))
+    short_cutoff = cfg.caption_mix_short
+    medium_cutoff = short_cutoff + cfg.caption_mix_medium
+    selected = []
+    for value, short, medium, long in zip(
+            choices, short_captions, medium_captions, long_captions):
+        if value < short_cutoff and short:
+            selected.append(short)
+        elif value < medium_cutoff and medium:
+            selected.append(medium)
+        else:
+            selected.append(long)
+    return selected
+
+
+def clip_visible_prompts(state: TrainingState, captions):
+    """Return the exact textual prefix visible to CLIP's 77-token encoder."""
+    tokens = state.clip_tokenizer(
+        _as_prompt_list(captions),
+        padding=False,
+        truncation=True,
+        max_length=state.cfg.clip_anchor_tokens,
+    )
+    return state.clip_tokenizer.batch_decode(
+        tokens["input_ids"],
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
 
 
 def clip_scaffold_scale(cfg: TrainConfig, step: int) -> float:
@@ -308,8 +355,26 @@ def make_encode_gemma(state: TrainingState):
     @torch.no_grad()
     def encode_gemma(prompts, max_length=None):
         max_length = max_length or state.cfg.max_gemma_len
+        prompts = _as_prompt_list(prompts)
+        untruncated = state.gemma_tokenizer(
+            prompts, padding=False, truncation=False)
+        lengths = [len(ids) for ids in untruncated["input_ids"]]
+        longest = max(lengths, default=0)
+        previous_max = getattr(state, "_gemma_prompt_max_observed", -1)
+        if longest > previous_max:
+            print(
+                f"Gemma prompt tokens: batch_min={min(lengths, default=0)} "
+                f"batch_max={longest} observed_max={longest} limit={max_length}"
+            )
+            state._gemma_prompt_max_observed = longest
+        if longest > max_length and state.cfg.fail_on_prompt_truncation:
+            index = lengths.index(longest)
+            raise ValueError(
+                f"Gemma prompt has {longest} tokens but max_gemma_len={max_length}; "
+                f"refusing silent truncation: {prompts[index][:160]!r}"
+            )
         toks = state.gemma_tokenizer(
-            _as_prompt_list(prompts),
+            prompts,
             padding="max_length", truncation=True,
             max_length=max_length, return_tensors="pt",
         ).to(state.gemma_model.device)
@@ -395,7 +460,8 @@ def run_clip_pretrain(state: TrainingState):
     state.vae.eval()
 
     plan = estimate_steps(cfg.max_samples_pretrain, cfg.train_batch_size,
-                          cfg.pretrain_epochs, cfg.pretrain_max_opt_steps)
+                          cfg.pretrain_epochs, cfg.pretrain_max_opt_steps,
+                          drop_last=cfg.drop_last_bucket_batches)
     plan.name = "clip_pretrain"
     plan.print()
 
@@ -416,10 +482,22 @@ def run_clip_pretrain(state: TrainingState):
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
-            buckets=cfg.aspect_ratio_buckets)
+            buckets=cfg.aspect_ratio_buckets,
+            drop_last=cfg.drop_last_bucket_batches)
         progress = tqdm(dl, desc=f"CLIP-pretrain {epoch+1}/{cfg.pretrain_epochs}")
         for batch in progress:
-            captions = _as_prompt_list(batch["caption"])
+            long_captions = _as_prompt_list(batch["caption"])
+            supplied_short = _as_prompt_list(batch.get(
+                "caption_short", [""] * len(long_captions)))
+            phase0_sources = [short or long for short, long in zip(
+                supplied_short, long_captions)]
+            captions = clip_visible_prompts(state, phase0_sources)
+            if epoch == 0 and opt_step == 0:
+                supplied = sum(bool(caption) for caption in supplied_short)
+                print(
+                    f"Phase 0 short captions supplied={supplied}/{len(captions)}; "
+                    "all inputs are reduced to the exact CLIP-visible decoded prefix"
+                )
             with torch.no_grad():
                 gh, gm = state.encode_gemma(captions)
                 ch, cm = state.encode_clip(captions)
@@ -556,7 +634,8 @@ def run_ella_training(state: TrainingState):
                  if cfg.phase1_semantic_anchor_weight > 0 else None)
 
     plan = estimate_steps(cfg.max_samples_ella, cfg.train_batch_size,
-                          cfg.ella_epochs, cfg.ella_max_opt_steps)
+                          cfg.ella_epochs, cfg.ella_max_opt_steps,
+                          drop_last=cfg.drop_last_bucket_batches)
     plan.name = "ella_frozen_unet"
     plan.print()
 
@@ -577,11 +656,13 @@ def run_ella_training(state: TrainingState):
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
-            buckets=cfg.aspect_ratio_buckets)
+            buckets=cfg.aspect_ratio_buckets,
+            drop_last=cfg.drop_last_bucket_batches)
         progress = tqdm(dl, desc=f"ELLA {epoch+1}/{cfg.ella_epochs}")
         for batch in progress:
             captions = apply_conditioning_dropout(
-                batch["caption"], cfg.conditioning_dropout_prob)
+                select_training_captions(batch, cfg),
+                cfg.conditioning_dropout_prob)
             img = batch["image"].to(device=state.device,
                                      dtype=state.unet_dtype)
             image_mask = batch.get("image_mask")
@@ -669,8 +750,6 @@ def run_ella_training(state: TrainingState):
             }
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            grad_stats = connector_extra_grad_stats(
-                state.connector, cfg.clip_anchor_tokens, state)
             nn.utils.clip_grad_norm_(state.connector.parameters(),
                                       cfg.grad_clip_norm)
             optimizer.step()
@@ -687,18 +766,6 @@ def run_ella_training(state: TrainingState):
                     "ella/loss_delta": float(loss_delta.item()),
                     "ella/loss_anchor": float(loss_anchor.item()),
                     "ella/clip_scaffold_scale": scaffold_scale,
-                    "ella/extra_gate_grad_norm":
-                        grad_stats["extra_gate_grad_norm"]
-                        if grad_stats["extra_gate_grad_norm"] is not None
-                        else 0.0,
-                    "ella/extra_query_grad_norm":
-                        grad_stats["extra_query_grad_norm"]
-                        if grad_stats["extra_query_grad_norm"] is not None
-                        else 0.0,
-                    "ella/extra_pos_grad_norm":
-                        grad_stats["extra_pos_grad_norm"]
-                        if grad_stats["extra_pos_grad_norm"] is not None
-                        else 0.0,
                 }, wandb=state.wandb)
 
             if (cfg.validation_every_opt_steps
@@ -715,18 +782,7 @@ def run_ella_training(state: TrainingState):
                     cfg.val_prompts[0], state,
                     label=f"ella_step_{opt_step:06d}", wandb=state.wandb)
                 if (cfg.run_long_context_diagnostics
-                        and cfg.context_tokens > cfg.clip_anchor_tokens):
-                    ab = extra_token_ablation_metrics(
-                        cfg.val_prompts[0], state,
-                        label=f"ella_step_{opt_step:06d}",
-                        wandb=state.wandb)
-                    zd = ab.get("rel_diff_full_vs_zeroextra_delta")
-                    if zd is not None:
-                        safe_wandb_log({"ella/suffix_zero_delta": zd}, wandb=state.wandb)
-                        if zd < 0.03:
-                            print(f"⚠  LOW suffix sensitivity: "
-                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} - "
-                                  f"extra tokens have almost no effect on CFG delta")
+                        and cfg.max_gemma_len > cfg.clip_anchor_tokens):
                     suffix_counterfactual_sensitivity(
                         state, label=f"ella_step_{opt_step:06d}",
                         wandb=state.wandb)
@@ -834,7 +890,8 @@ def run_sara_training(state: TrainingState):
                  if cfg.phase2_semantic_anchor_weight > 0 else None)
 
     plan = estimate_steps(cfg.max_samples_sara, cfg.train_batch_size,
-                          cfg.sara_epochs, cfg.sara_max_opt_steps)
+                          cfg.sara_epochs, cfg.sara_max_opt_steps,
+                          drop_last=cfg.drop_last_bucket_batches)
     plan.name = "ella_sara_attn2_kv"
     plan.print()
 
@@ -854,11 +911,13 @@ def run_sara_training(state: TrainingState):
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
-            buckets=cfg.aspect_ratio_buckets)
+            buckets=cfg.aspect_ratio_buckets,
+            drop_last=cfg.drop_last_bucket_batches)
         progress = tqdm(dl, desc=f"ELLA+SaRA {epoch+1}/{cfg.sara_epochs}")
         for batch in progress:
             captions = apply_conditioning_dropout(
-                batch["caption"], cfg.conditioning_dropout_prob)
+                select_training_captions(batch, cfg),
+                cfg.conditioning_dropout_prob)
             img = batch["image"].to(device=state.device, dtype=state.unet_dtype)
             image_mask = batch.get("image_mask")
             if image_mask is not None:
@@ -935,7 +994,6 @@ def run_sara_training(state: TrainingState):
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            grad_stats = connector_extra_grad_stats(state.connector, cfg.clip_anchor_tokens, state)
             nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip_norm)
             optimizer.step()
             opt_step += 1
@@ -950,18 +1008,6 @@ def run_sara_training(state: TrainingState):
                     "sara/loss_teacher": float(loss_teacher.item()),
                     "sara/loss_delta": float(loss_delta.item()),
                     "sara/loss_anchor": float(loss_anchor.item()),
-                    "sara/extra_gate_grad_norm":
-                        grad_stats["extra_gate_grad_norm"]
-                        if grad_stats["extra_gate_grad_norm"] is not None
-                        else 0.0,
-                    "sara/extra_query_grad_norm":
-                        grad_stats["extra_query_grad_norm"]
-                        if grad_stats["extra_query_grad_norm"] is not None
-                        else 0.0,
-                    "sara/extra_pos_grad_norm":
-                        grad_stats["extra_pos_grad_norm"]
-                        if grad_stats["extra_pos_grad_norm"] is not None
-                        else 0.0,
                 }, wandb=state.wandb)
 
             if (cfg.validation_every_opt_steps
@@ -978,18 +1024,7 @@ def run_sara_training(state: TrainingState):
                     cfg.val_prompts[0], state,
                     label=f"sara_step_{opt_step:06d}", wandb=state.wandb)
                 if (cfg.run_long_context_diagnostics
-                        and cfg.context_tokens > cfg.clip_anchor_tokens):
-                    ab = extra_token_ablation_metrics(
-                        cfg.val_prompts[0], state,
-                        label=f"sara_step_{opt_step:06d}",
-                        wandb=state.wandb)
-                    zd = ab.get("rel_diff_full_vs_zeroextra_delta")
-                    if zd is not None:
-                        safe_wandb_log({"sara/suffix_zero_delta": zd}, wandb=state.wandb)
-                        if zd < 0.03:
-                            print(f"⚠  LOW suffix sensitivity: "
-                                  f"rel_diff_full_vs_zeroextra_delta={zd:.5f} - "
-                                  f"extra tokens have almost no effect on CFG delta")
+                        and cfg.max_gemma_len > cfg.clip_anchor_tokens):
                     suffix_counterfactual_sensitivity(
                         state, label=f"sara_step_{opt_step:06d}",
                         wandb=state.wandb)
@@ -1085,10 +1120,16 @@ def run_validation_grids(state: TrainingState):
     print_final_summary("final_eval")
 
     if (cfg.run_long_context_diagnostics
-            and cfg.context_tokens > cfg.clip_anchor_tokens):
-        print("Long-context numeric suite skipped in script mode")
+            and cfg.max_gemma_len > cfg.clip_anchor_tokens):
+        suffix_metrics = suffix_counterfactual_sensitivity(
+            state, label="final_suffix", wandb=state.wandb)
+        fev_summary["suffix_sensitivity_mean"] = suffix_metrics.get(
+            "suffix_sensitivity_mean")
+        remember_final_summary(
+            "final_eval", fev_summary,
+            wandb_prefix="final/eval", wandb=state.wandb)
     else:
-        print("Long-context numeric suite skipped at 77-token stage")
+        print("Long-input diagnostics disabled")
 
     if cfg.run_fixed_validation_grids:
         ella_imgs, labels = [], []
@@ -1313,29 +1354,30 @@ def run_complex_prompt_checks(state: TrainingState):
             steps=cfg.val_steps, guidance=cfg.val_guidance,
             seed=cfg.val_seed, context_tokens=cfg.clip_anchor_tokens,
         ))
-        long_labels.append(f"short L{cfg.clip_anchor_tokens}")
+        long_labels.append(f"short -> C{cfg.context_tokens}")
         long_imgs.append(generate_ella(
             long, state,
             steps=cfg.val_steps, guidance=cfg.val_guidance,
             seed=cfg.val_seed, context_tokens=ctx,
         ))
-        long_labels.append(f"long L{ctx}")
-    long_path = f"{out}/validation_long_context_L{ctx}.png"
+        long_labels.append(f"long G{cfg.max_gemma_len} -> C{ctx}")
+    long_path = f"{out}/validation_long_input_G{cfg.max_gemma_len}_C{ctx}.png"
     save_validation_grid(long_imgs, long_labels, long_path,
-                         f"Long-context ELLA L{ctx}")
+                         f"Long-input ELLA G{cfg.max_gemma_len} -> C{ctx}")
     print(f"Long-context grid saved: {long_path}")
 
     # Suffix counterfactual grids
-    if cfg.run_suffix_counterfactual_grids and ctx > cfg.clip_anchor_tokens:
+    if (cfg.run_suffix_counterfactual_grids
+            and cfg.max_gemma_len > cfg.clip_anchor_tokens):
         sfx_out = save_suffix_counterfactual_grids(
             cfg.suffix_counterfactual_cases,
-            f"{out}/validation_suffix_counterfactual_L{ctx}",
+            f"{out}/validation_suffix_counterfactual_G{cfg.max_gemma_len}_C{ctx}",
             "Suffix counterfactuals", state, context_tokens=ctx,
         )
         for p in sfx_out:
             print(f"Suffix counterfactual grid saved: {p}")
-    elif ctx <= cfg.clip_anchor_tokens:
-        print("Suffix counterfactual grids skipped at 77-token stage")
+    else:
+        print("Suffix counterfactual grids disabled")
 
 
 # ---------------------------------------------------------------------------
@@ -1447,7 +1489,8 @@ def main():
             max_samples=max(cfg.max_samples_ella, 4), batch_size=4,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
-            buckets=cfg.aspect_ratio_buckets)
+            buckets=cfg.aspect_ratio_buckets,
+            drop_last=False)
         batch = next(iter(dl))
         state.overfit_eval_batch = {
             "image": batch["image"],

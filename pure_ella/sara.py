@@ -99,8 +99,8 @@ def install_sara_gradient_masks(unet: nn.Module) -> list:
             continue
 
         def make_hook(m: torch.Tensor):
-            mm = m.to(device=p.device, dtype=p.dtype)
-            return lambda grad: grad * mm.to(dtype=grad.dtype)
+            mm = m.to(device=p.device)
+            return lambda grad: grad * mm
 
         handles.append(p.register_hook(make_hook(mask)))
 

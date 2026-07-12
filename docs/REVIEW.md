@@ -9,15 +9,15 @@ Findings ordered by severity. Status column is for tracking fixes.
 
 | # | Severity | Where | Finding | Status |
 |---|----------|-------|---------|--------|
-| 1 | **Bug** | `train.py:800`, `train.py:817` | `max_samples_sara` never used — SaRA phase runs on `max_samples_ella` | open |
-| 2 | **Bug** | `pure_ella/config.py:294` | `resolve_sd_checkpoint` fallback chain unreachable for absolute paths | open |
+| 1 | **Bug** | `train.py:800`, `train.py:817` | `max_samples_sara` never used — SaRA phase runs on `max_samples_ella` | **fixed** |
+| 2 | **Bug** | `pure_ella/config.py:294` | `resolve_sd_checkpoint` fallback chain unreachable for absolute paths | **fixed** |
 | 3 | Refactor | `train.py:490–745` vs `751–991` | ~200 duplicated lines between ELLA and SaRA training loops | open |
-| 4 | Perf | `train.py:602`, `train.py:882` | `ClipGeometryLoss()` constructed every step inside the loop | open |
-| 5 | Memory | `pure_ella/sara.py:54` | Sparse masks stored at weight dtype (fp32) instead of bool | open |
+| 4 | Perf | `train.py:602`, `train.py:882` | `ClipGeometryLoss()` constructed every step inside the loop | **fixed** |
+| 5 | Memory | `pure_ella/sara.py:54` | Sparse masks stored at weight dtype (fp32) instead of bool | **fixed** |
 | 6 | Config | `train.py:1352` | `unet_dtype` hardcoded `torch.float32`, no bf16/autocast option | open |
-| 7 | Hazard | `pure_ella/config.py:279–282` | Unknown JSON keys silently dropped (typos vanish) | open |
-| 8 | Hazard | `pure_ella/config.py:213–218` | `context_tokens` in JSON silently overridden by `experiment_stage` | open |
-| 9 | Hazard | `pure_ella/config.py:224–245` | `run_mode` overfit/diagnostic overrides clobber JSON-provided budgets | open |
+| 7 | Hazard | `pure_ella/config.py:279–282` | Unknown JSON keys silently dropped (typos vanish) | **fixed** |
+| 8 | Hazard | `pure_ella/config.py:213–218` | `context_tokens` in JSON silently overridden by `experiment_stage` | **fixed** |
+| 9 | Hazard | `pure_ella/config.py:224–245` | `run_mode` overfit/diagnostic overrides clobber JSON-provided budgets | **fixed** |
 | 10 | Perf | `pure_ella/dataset.py:101` | `num_workers=0` on streaming loader — decode/resize on main thread | open |
 | 11 | Docs | `README.md` | Called SaRA phase a "stub" — it is fully implemented | **fixed** |
 

@@ -172,58 +172,6 @@ def _rel_diff(a, b, eps: float = 1e-8) -> float:
     return float((a - b).pow(2).mean().sqrt().item() / (b.pow(2).mean().sqrt().item() + eps))
 
 
-def _maybe_float(x):
-    return None if x is None else float(x)
-
-
-# ---------------------------------------------------------------------------
-# Extra-token utilities
-# ---------------------------------------------------------------------------
-def zero_extra_tokens(ctx, anchor_tokens: int):
-    if ctx.shape[1] <= anchor_tokens:
-        return ctx
-    out = ctx.clone()
-    out[:, anchor_tokens:, :] = 0
-    return out
-
-
-def summarize_context_tokens(ctx, anchor_tokens: int, extra_gate=None) -> dict:
-    ctx = ctx.float()
-    base = ctx[:, :anchor_tokens, :]
-    extra = ctx[:, anchor_tokens:, :]
-    base_rms = base.pow(2).mean().sqrt().item()
-    out = {"base_rms": base_rms, "extra_gate": _maybe_float(extra_gate)}
-    if extra.numel() == 0:
-        out.update({"extra_rms": 0.0, "extra_abs_mean": 0.0, "extra_to_base_ratio": 0.0})
-    else:
-        extra_rms = extra.pow(2).mean().sqrt().item()
-        out.update({
-            "extra_rms": extra_rms,
-            "extra_abs_mean": extra.abs().mean().item(),
-            "extra_to_base_ratio": extra_rms / max(base_rms, 1e-8),
-        })
-    return out
-
-
-def connector_extra_grad_stats(model, anchor_tokens: int, state):
-    if getattr(model, "extra_gate_logit", None) is None:
-        return {"extra_gate_grad_norm": None, "extra_query_grad_norm": None, "extra_pos_grad_norm": None}
-    stats = {}
-    gate_grad = model.extra_gate_logit.grad
-    stats["extra_gate_grad_norm"] = float(gate_grad.detach().float().norm().item()) if gate_grad is not None else None
-    q_grad = getattr(model, "query_tokens", None)
-    p_grad = getattr(model, "pos_emb", None)
-    if q_grad is not None and q_grad.grad is not None and q_grad.shape[1] > anchor_tokens:
-        stats["extra_query_grad_norm"] = float(q_grad.grad[:, anchor_tokens:, :].detach().float().norm().item())
-    else:
-        stats["extra_query_grad_norm"] = None
-    if p_grad is not None and p_grad.grad is not None and p_grad.shape[1] > anchor_tokens:
-        stats["extra_pos_grad_norm"] = float(p_grad.grad[:, anchor_tokens:, :].detach().float().norm().item())
-    else:
-        stats["extra_pos_grad_norm"] = None
-    return stats
-
-
 # ---------------------------------------------------------------------------
 # Generation helpers
 # ---------------------------------------------------------------------------
@@ -323,6 +271,8 @@ def connector_prompt_sensitivity(prompts: List[str], state, timestep: int = 500,
     encode_gemma = state.encode_gemma
     cfg = state.cfg
 
+    connector_was_training = connector.training
+    unet_was_training = unet.training
     connector.eval(); unet.eval()
     gen = torch.Generator(device=device).manual_seed(123)
     latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
@@ -342,6 +292,8 @@ def connector_prompt_sensitivity(prompts: List[str], state, timestep: int = 500,
             print(f"[{label}] {i} vs {j}: rel_diff={diff:.6f}")
     mean_val = float(np.mean(vals)) if vals else 0.0
     safe_wandb_log({f"diagnostics/{label}_mean_relative_diff": mean_val}, summary_prefix=f"diagnostics/{label}", wandb=wandb)
+    connector.train(connector_was_training)
+    unet.train(unet_was_training)
     return mean_val
 
 
@@ -468,70 +420,6 @@ def save_validation_grid(images: List[Image.Image], labels: List[str], path: str
 
 
 # ---------------------------------------------------------------------------
-# Extra-token ablation metrics
-# ---------------------------------------------------------------------------
-@torch.no_grad()
-def extra_token_ablation_metrics(prompt: str, state, timestep: int = None, seed: int = None,
-                                  context_tokens: int = None, label: str = "extra_tokens",
-                                  negative_prompt: str = "", wandb=None) -> dict:
-    cfg = state.cfg
-    timestep = cfg.extra_token_diagnostic_timestep if timestep is None else int(timestep)
-    seed = cfg.extra_token_diagnostic_seed if seed is None else int(seed)
-    context_tokens = cfg.context_tokens if context_tokens is None else int(context_tokens)
-    if context_tokens <= cfg.clip_anchor_tokens:
-        print(f"[{label}] context_tokens={context_tokens}; extra-token skipped at 77-token")
-        return {"skipped": 1.0}
-
-    connector = state.connector
-    unet = state.unet
-    scheduler = state.scheduler
-    device = state.device
-    unet_dtype = state.unet_dtype
-    encode_gemma = state.encode_gemma
-
-    connector.eval(); unet.eval()
-    gen = torch.Generator(device=device).manual_seed(int(seed))
-    latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
-    noise = torch.randn_like(latent)
-    t = torch.tensor([int(timestep)], device=device).long()
-    noisy = scheduler.add_noise(latent, noise, t)
-
-    gh, gm = encode_gemma([prompt])
-    ugh, ugm = encode_gemma([negative_prompt or ""])
-    ctx77 = connector(gh.to(dtype=unet_dtype), t, gm, context_tokens=cfg.clip_anchor_tokens)
-    ctx_full = connector(gh.to(dtype=unet_dtype), t, gm, context_tokens=context_tokens)
-    ctx_zero = zero_extra_tokens(ctx_full, cfg.clip_anchor_tokens)
-    uctx77 = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=cfg.clip_anchor_tokens)
-    uctx_full = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=context_tokens)
-    uctx_zero = zero_extra_tokens(uctx_full, cfg.clip_anchor_tokens)
-
-    extra_gate = torch.sigmoid(connector.extra_gate_logit).item() if connector.extra_gate_logit is not None else None
-    metrics = summarize_context_tokens(ctx_full, cfg.clip_anchor_tokens, extra_gate=extra_gate)
-    metrics["prefix_drift_rel"] = _rel_diff(ctx_full[:, :cfg.clip_anchor_tokens, :], ctx77)
-
-    pred77 = unet(noisy, t, encoder_hidden_states=ctx77).sample.float()
-    predfull = unet(noisy, t, encoder_hidden_states=ctx_full).sample.float()
-    predzero = unet(noisy, t, encoder_hidden_states=ctx_zero).sample.float()
-    upred77 = unet(noisy, t, encoder_hidden_states=uctx77).sample.float()
-    upredfull = unet(noisy, t, encoder_hidden_states=uctx_full).sample.float()
-    upredzero = unet(noisy, t, encoder_hidden_states=uctx_zero).sample.float()
-
-    delta77 = pred77 - upred77
-    deltafull = predfull - upredfull
-    deltazero = predzero - upredzero
-
-    metrics.update({
-        "rel_diff_77_vs_full_cond": _rel_diff(predfull, pred77),
-        "rel_diff_full_vs_zeroextra_cond": _rel_diff(predfull, predzero),
-        "rel_diff_77_vs_full_delta": _rel_diff(deltafull, delta77),
-        "rel_diff_full_vs_zeroextra_delta": _rel_diff(deltafull, deltazero),
-    })
-    print(f"[{label}] " + ", ".join(f"{k}={v:.6f}" for k, v in metrics.items() if isinstance(v, (int, float))))
-    _log_metrics(f"extra_tokens/{label}", metrics, wandb=wandb)
-    return metrics
-
-
-# ---------------------------------------------------------------------------
 # Image quality metrics (FID, KID, collapse)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
@@ -602,9 +490,10 @@ def save_suffix_counterfactual_grids(
     """Generate suffix counterfactual grids (short vs long prompt comparisons)."""
     cfg = state.cfg
     ctx = context_tokens or cfg.context_tokens
-    if ctx <= cfg.clip_anchor_tokens:
-        print("Suffix counterfactual grids skipped at 77-token stage")
+    if cfg.max_gemma_len <= cfg.clip_anchor_tokens:
+        print("Suffix counterfactual grids skipped without long Gemma input")
         return []
+    validate_suffix_counterfactual_token_boundaries(state, cases)
     prefix = cfg.suffix_counterfactual_prefix
     out_paths = []
     for case in cases:
@@ -627,7 +516,7 @@ def save_suffix_counterfactual_grids(
             seed=case.get("seed", cfg.val_seed),
             context_tokens=ctx,
         ))
-        labels.append(f"fullA@L{ctx} {case['name']}")
+        labels.append(f"fullA@G{cfg.max_gemma_len}/C{ctx} {case['name']}")
         # Full prompt B at context_tokens
         imgs.append(generate_ella(
             prefix + " " + case["prompt_suffix_b"], state,
@@ -636,7 +525,7 @@ def save_suffix_counterfactual_grids(
             seed=case.get("seed", cfg.val_seed),
             context_tokens=ctx,
         ))
-        labels.append(f"fullB@L{ctx} {case['name']}")
+        labels.append(f"fullB@G{cfg.max_gemma_len}/C{ctx} {case['name']}")
         out_path = f"{path_prefix}_{case['name']}.png"
         save_validation_grid(imgs, labels, out_path, f"{title_prefix}: {case['name']}")
         out_paths.append(out_path)
@@ -644,8 +533,49 @@ def save_suffix_counterfactual_grids(
 
 
 # ---------------------------------------------------------------------------
-# Suffix counterfactual sensitivity (diagnostic + training loss)
+# Suffix counterfactual sensitivity
 # ---------------------------------------------------------------------------
+def _gemma_token_count(state, text: str) -> int:
+    return len(state.gemma_tokenizer.encode(
+        text, add_special_tokens=True, truncation=False))
+
+
+def validate_suffix_counterfactual_token_boundaries(state, cases=None) -> dict:
+    """Prove that suffix cases test late, non-truncated Gemma input."""
+    cfg = state.cfg
+    cases = cfg.suffix_counterfactual_cases if cases is None else cases
+    prefix = cfg.suffix_counterfactual_prefix
+    prefix_tokens = _gemma_token_count(state, prefix + " ")
+    if prefix_tokens <= cfg.clip_anchor_tokens:
+        raise ValueError(
+            f"Suffix starts at Gemma token {prefix_tokens}, not after the "
+            f"{cfg.clip_anchor_tokens}-token anchor"
+        )
+
+    per_case = {}
+    for case in cases:
+        prompt_a = prefix + " " + case["prompt_suffix_a"]
+        prompt_b = prefix + " " + case["prompt_suffix_b"]
+        tokens_a = _gemma_token_count(state, prompt_a)
+        tokens_b = _gemma_token_count(state, prompt_b)
+        longest = max(tokens_a, tokens_b)
+        if longest > cfg.max_gemma_len:
+            raise ValueError(
+                f"Suffix diagnostic {case['name']!r} needs {longest} Gemma "
+                f"tokens but max_gemma_len={cfg.max_gemma_len}"
+            )
+        per_case[case["name"]] = {
+            "prefix_tokens": prefix_tokens,
+            "prompt_a_tokens": tokens_a,
+            "prompt_b_tokens": tokens_b,
+        }
+        print(
+            f"[suffix_tokens] {case['name']}: prefix={prefix_tokens} "
+            f"full_a={tokens_a} full_b={tokens_b} limit={cfg.max_gemma_len}"
+        )
+    return per_case
+
+
 @torch.no_grad()
 def suffix_counterfactual_sensitivity(
     state, label: str = "suffix_cf", wandb=None,
@@ -657,8 +587,10 @@ def suffix_counterfactual_sensitivity(
     """
     cfg = state.cfg
     ctx = cfg.context_tokens
-    if ctx <= cfg.clip_anchor_tokens or not cfg.suffix_counterfactual_cases:
+    if (cfg.max_gemma_len <= cfg.clip_anchor_tokens
+            or not cfg.suffix_counterfactual_cases):
         return {"suffix_sensitivity_mean": None, "per_case": {}}
+    token_boundaries = validate_suffix_counterfactual_token_boundaries(state)
     
     connector = state.connector
     unet = state.unet
@@ -666,10 +598,12 @@ def suffix_counterfactual_sensitivity(
     device = state.device
     unet_dtype = state.unet_dtype
     encode_gemma = state.encode_gemma
-    
+
+    connector_was_training = connector.training
+    unet_was_training = unet.training
     connector.eval(); unet.eval()
     prefix = cfg.suffix_counterfactual_prefix
-    timestep = cfg.extra_token_diagnostic_timestep
+    timestep = cfg.suffix_diagnostic_timestep
     
     sensitivities = {}
     for case in cfg.suffix_counterfactual_cases:
@@ -679,30 +613,28 @@ def suffix_counterfactual_sensitivity(
         
         gen = torch.Generator(device=device).manual_seed(int(case.get("seed", 777)))
         latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
-        noise = torch.randn_like(latent)
+        noise = torch.randn(
+            latent.shape, generator=gen, device=device, dtype=unet_dtype)
         t = torch.tensor([int(timestep)], device=device).long()
         noisy = scheduler.add_noise(latent, noise, t)
         
         # Encode prompts
         gh_a, gm_a = encode_gemma([prompt_a])
         gh_b, gm_b = encode_gemma([prompt_b])
-        ugh_a, ugm_a = encode_gemma([""])
-        ugh_b, ugm_b = encode_gemma([""])
+        ugh, ugm = encode_gemma([""])
         
         # Get contexts (cond + uncond for each)
         ctx_a_c = connector(gh_a.to(dtype=unet_dtype), t, gm_a, context_tokens=ctx)
-        ctx_a_u = connector(ugh_a.to(dtype=unet_dtype), t, ugm_a, context_tokens=ctx)
+        ctx_u = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=ctx)
         ctx_b_c = connector(gh_b.to(dtype=unet_dtype), t, gm_b, context_tokens=ctx)
-        ctx_b_u = connector(ugh_b.to(dtype=unet_dtype), t, ugm_b, context_tokens=ctx)
         
         # UNet predictions
         pred_a_c = unet(noisy, t, encoder_hidden_states=ctx_a_c).sample.float()
-        pred_a_u = unet(noisy, t, encoder_hidden_states=ctx_a_u).sample.float()
+        pred_u = unet(noisy, t, encoder_hidden_states=ctx_u).sample.float()
         pred_b_c = unet(noisy, t, encoder_hidden_states=ctx_b_c).sample.float()
-        pred_b_u = unet(noisy, t, encoder_hidden_states=ctx_b_u).sample.float()
         
-        delta_a = pred_a_c - pred_a_u
-        delta_b = pred_b_c - pred_b_u
+        delta_a = pred_a_c - pred_u
+        delta_b = pred_b_c - pred_u
         
         sensitivity = _rel_diff(delta_a, delta_b)
         sensitivities[name] = sensitivity
@@ -711,69 +643,10 @@ def suffix_counterfactual_sensitivity(
     mean_sens = float(np.mean(list(sensitivities.values()))) if sensitivities else 0.0
     _log_metrics(f"suffix_sensitivity/{label}", sensitivities, wandb=wandb)
     safe_wandb_log({f"suffix_sensitivity/{label}_mean": mean_sens}, wandb=wandb)
-    return {"suffix_sensitivity_mean": mean_sens, "per_case": sensitivities}
-
-
-def suffix_counterfactual_contrastive_loss(
-    state, margin: float = 0.05,
-) -> torch.Tensor:
-    """Training-time loss: penalize when suffix variants produce identical CFG deltas.
-    
-    For each counterfactual case, computes:
-        loss = max(0, margin - rel_diff(delta_a, delta_b))
-    
-    Returns a scalar loss that encourages suffix sensitivity.
-    """
-    cfg = state.cfg
-    ctx = cfg.context_tokens
-    if ctx <= cfg.clip_anchor_tokens or not cfg.suffix_counterfactual_cases:
-        return torch.tensor(0.0, device=state.device)
-    
-    connector = state.connector
-    unet = state.unet
-    scheduler = state.scheduler
-    device = state.device
-    unet_dtype = state.unet_dtype
-    encode_gemma = state.encode_gemma
-    
-    prefix = cfg.suffix_counterfactual_prefix
-    timestep = cfg.extra_token_diagnostic_timestep
-    
-    total_loss = torch.tensor(0.0, device=device)
-    n_cases = 0
-    
-    for case in cfg.suffix_counterfactual_cases:
-        prompt_a = prefix + " " + case["prompt_suffix_a"]
-        prompt_b = prefix + " " + case["prompt_suffix_b"]
-        seed = int(case.get("seed", 777))
-        
-        gen = torch.Generator(device=device).manual_seed(seed)
-        latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
-        noise = torch.randn_like(latent)
-        t = torch.tensor([int(timestep)], device=device).long()
-        noisy = scheduler.add_noise(latent, noise, t)
-        
-        gh_a, gm_a = encode_gemma([prompt_a])
-        gh_b, gm_b = encode_gemma([prompt_b])
-        ugh, ugm = encode_gemma([""])
-        
-        ctx_a_c = connector(gh_a.to(dtype=unet_dtype), t, gm_a, context_tokens=ctx)
-        ctx_a_u = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=ctx)
-        ctx_b_c = connector(gh_b.to(dtype=unet_dtype), t, gm_b, context_tokens=ctx)
-        ctx_b_u = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=ctx)
-        
-        pred_a_c = unet(noisy, t, encoder_hidden_states=ctx_a_c).sample.float()
-        pred_a_u = unet(noisy, t, encoder_hidden_states=ctx_a_u).sample.float()
-        pred_b_c = unet(noisy, t, encoder_hidden_states=ctx_b_c).sample.float()
-        pred_b_u = unet(noisy, t, encoder_hidden_states=ctx_b_u).sample.float()
-        
-        delta_a = pred_a_c - pred_a_u
-        delta_b = pred_b_c - pred_b_u
-        
-        rd = (delta_a - delta_b).pow(2).mean().sqrt() / (delta_b.pow(2).mean().sqrt().clamp_min(1e-8))
-        total_loss = total_loss + F.relu(margin - rd)
-        n_cases += 1
-    
-    if n_cases == 0:
-        return torch.tensor(0.0, device=device)
-    return total_loss / n_cases
+    connector.train(connector_was_training)
+    unet.train(unet_was_training)
+    return {
+        "suffix_sensitivity_mean": mean_sens,
+        "per_case": sensitivities,
+        "token_boundaries": token_boundaries,
+    }

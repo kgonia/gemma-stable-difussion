@@ -91,8 +91,9 @@ class TimestepAwareConnectorBlock(nn.Module):
         )
         cross_q = self._modulate(
             self.cross_norm(q), cross_shift, cross_scale)
+        normalized_kv = self.kv_norm(kv)
         cross_out, _ = self.cross(
-            cross_q, self.kv_norm(kv), self.kv_norm(kv),
+            cross_q, normalized_kv, normalized_kv,
             key_padding_mask=key_padding_mask, need_weights=False,
         )
         q = q + cross_out
@@ -279,6 +280,12 @@ class TRMYZConnector(nn.Module):
         assert context_tokens >= anchor_tokens
         self.context_tokens = int(context_tokens)
         self.anchor_tokens = int(anchor_tokens)
+        self.gemma_layer_mix_count = int(gemma_layer_mix_count)
+        if self.gemma_layer_mix_count < 1:
+            raise ValueError("gemma_layer_mix_count must be positive")
+        mix_init = torch.full((self.gemma_layer_mix_count,), -4.0)
+        mix_init[-1] = 0.0
+        self.layer_mix_logits = nn.Parameter(mix_init)
         self.trm_outer_steps = int(trm_outer_steps)
         self.trm_inner_steps = int(trm_inner_steps)
         self.trm_scratch_tokens = int(trm_scratch_tokens)
@@ -330,12 +337,26 @@ class TRMYZConnector(nn.Module):
             return torch.cat([base, extra], dim=1)
         return y
 
+    def _mix_gemma_layers(self, gemma_h):
+        if gemma_h.ndim == 3:
+            if self.gemma_layer_mix_count != 1:
+                raise ValueError(
+                    "TRM expects stacked Gemma layers with shape [B, K, L, D]"
+                )
+            return gemma_h
+        if gemma_h.ndim != 4 or gemma_h.shape[1] != self.gemma_layer_mix_count:
+            raise ValueError(
+                f"Expected {self.gemma_layer_mix_count} stacked Gemma layers"
+            )
+        weights = torch.softmax(self.layer_mix_logits, dim=0).to(
+            device=gemma_h.device, dtype=gemma_h.dtype)
+        return (gemma_h * weights[None, :, None, None]).sum(dim=1)
+
     def forward(self, gemma_h, timesteps, gemma_mask=None, context_tokens=None):
         context_tokens = int(context_tokens or self.context_tokens)
         if context_tokens > self.context_tokens:
             raise ValueError(f"Requested context_tokens={context_tokens}, max is {self.context_tokens}")
-        if gemma_h.ndim == 4:
-            gemma_h = gemma_h[:, -1]
+        gemma_h = self._mix_gemma_layers(gemma_h)
         x = self.input_norm(self.input_proj(gemma_h.to(dtype=self.input_proj.weight.dtype)))
         pooled = self._masked_mean(x, gemma_mask)
         temb = self.time_mlp(

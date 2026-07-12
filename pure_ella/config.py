@@ -6,6 +6,7 @@ All uppercase keys from the JSON become module-level constants.
 """
 from __future__ import annotations
 import json
+import math
 import sys
 import os
 from pathlib import Path
@@ -44,11 +45,9 @@ class TrainConfig:
     # fixed 77-token cross-attention contract.
     context_tokens: int = 77
     clip_anchor_tokens: int = 77  # always 77 for SD1.5
-    long_context_target: int = 256  # deprecated alias retained for old configs
 
     # --- SaRA phase ---
     run_sara_phase: bool = False
-    run_reloaded_long_proof: bool = False
 
     # --- Data budget ---
     max_samples_pretrain: int = 6000
@@ -68,7 +67,8 @@ class TrainConfig:
     gemma_id: str = "google/gemma-3-270m-it"
     gemma_layer_index: int = -1
     gemma_layer_mix_count: int = 4
-    max_gemma_len: int = 256
+    max_gemma_len: int = 320
+    fail_on_prompt_truncation: bool = True
     clip_id: str = "openai/clip-vit-large-patch14"
     sd_checkpoint: str = ""  # path to .safetensors SD checkpoint, empty = use runwayml/stable-diffusion-v1-5
 
@@ -99,7 +99,7 @@ class TrainConfig:
     lambda_diffusion: float = 1.0
     lambda_teacher: float = 0.5
     lambda_text_delta: float = 1.0
-    clip_teacher_decay_steps: int = 5000
+    clip_teacher_decay_steps: int = 5000  # optional short-caption scaffold only
 
     # --- SaRA ---
     sara_scope: str = "attn2_kv_sparse"
@@ -117,6 +117,10 @@ class TrainConfig:
         [512, 512], [576, 448], [640, 384],
         [448, 576], [384, 640],
     ])
+    drop_last_bucket_batches: bool = True
+    caption_mix_short: float = 0.25
+    caption_mix_medium: float = 0.25
+    caption_mix_long: float = 0.50
     conditioning_dropout_prob: float = 0.1
 
     # --- Quality metrics ---
@@ -145,11 +149,6 @@ class TrainConfig:
         "a neon-lit cyberpunk alleyway at night",
     ])
     # --- Complex / long-context prompt grids (from colab notebook) ---
-    run_complex_prompt_grids: bool = True
-    run_suffix_counterfactual_grids: bool = True
-    suffix_counterfactual_loss_weight: float = 0.0   # set >0 to add training-time suffix pressure
-    suffix_counterfactual_loss_every: int = 0         # apply every N steps (0=disabled)
-    suffix_counterfactual_loss_margin: float = 0.05   # hinge margin for rel_diff
     complex_prompt_steps: int = 30
     complex_prompt_guidance: float = 5.5
     complex_prompt_seed: int = 777
@@ -200,8 +199,7 @@ class TrainConfig:
             "seed": 2202, "steps": 30, "guidance": 5.5, "width": 512, "height": 512,
         },
     ])
-    extra_token_diagnostic_timestep: int = 500
-    extra_token_diagnostic_seed: int = 777
+    suffix_diagnostic_timestep: int = 500
 
     # --- Wandb ---
     wandb_enabled: bool = True
@@ -216,8 +214,6 @@ class TrainConfig:
         """Derive computed fields."""
         self.run_training = self.run_mode in {"overfit_train", "short_train", "full_train"}
         self.run_sara_phase = self.experiment_stage == "stage3_long_context_with_sara"
-        self.run_reloaded_long_proof = self.max_gemma_len > self.clip_anchor_tokens
-
         if self.experiment_stage not in {
             "stage1_77_pretrain_then_ella",
             "stage2_long_context_no_sara",
@@ -236,11 +232,15 @@ class TrainConfig:
             raise ValueError("gemma_layer_mix_count must be positive")
         if not 0.0 <= self.conditioning_dropout_prob < 1.0:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")
-        if self.suffix_counterfactual_loss_weight != 0.0:
-            raise ValueError(
-                "suffix_counterfactual_loss_weight is directionless and is no "
-                "longer supported as a training objective"
-            )
+        caption_mix = (
+            self.caption_mix_short,
+            self.caption_mix_medium,
+            self.caption_mix_long,
+        )
+        if any(weight < 0 for weight in caption_mix):
+            raise ValueError("caption mix weights must be non-negative")
+        if not math.isclose(sum(caption_mix), 1.0, rel_tol=0.0, abs_tol=1e-6):
+            raise ValueError("caption mix weights must sum to 1.0")
         if not self.aspect_ratio_buckets:
             raise ValueError("aspect_ratio_buckets must not be empty")
         for bucket in self.aspect_ratio_buckets:
