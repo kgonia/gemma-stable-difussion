@@ -56,29 +56,91 @@ class ELLAConnectorBlock(nn.Module):
         return x
 
 
-class PureELLALongConnector(nn.Module):
-    """Gemma -> timestep-aware ordered conditioning sequence [B, context_tokens, 768].
+class TimestepAwareConnectorBlock(nn.Module):
+    """TSC block with timestep-conditioned normalization."""
 
-    Optional CLIP pretrain anchors first 77 outputs. Later ELLA training may drift.
-    Extra tokens are gated near zero at init for stable length extension.
+    def __init__(self, width: int = 768, heads: int = 8,
+                 ff_mult: int = 4, dropout: float = 0.0):
+        super().__init__()
+        self.cross_norm = nn.LayerNorm(width, elementwise_affine=False)
+        self.kv_norm = nn.LayerNorm(width)
+        self.cross = nn.MultiheadAttention(
+            width, heads, dropout=dropout, batch_first=True)
+        self.self_norm = nn.LayerNorm(width, elementwise_affine=False)
+        self.self_attn = nn.MultiheadAttention(
+            width, heads, dropout=dropout, batch_first=True)
+        self.ff_norm = nn.LayerNorm(width, elementwise_affine=False)
+        self.ff = nn.Sequential(
+            nn.Linear(width, width * ff_mult),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(width * ff_mult, width),
+        )
+        self.time_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(width, width * 6),
+        )
+
+    @staticmethod
+    def _modulate(x, shift, scale):
+        return x * (1 + scale[:, None, :]) + shift[:, None, :]
+
+    def forward(self, q, kv, time_embedding, key_padding_mask=None):
+        cross_shift, cross_scale, self_shift, self_scale, ff_shift, ff_scale = (
+            self.time_modulation(time_embedding).chunk(6, dim=-1)
+        )
+        cross_q = self._modulate(
+            self.cross_norm(q), cross_shift, cross_scale)
+        cross_out, _ = self.cross(
+            cross_q, self.kv_norm(kv), self.kv_norm(kv),
+            key_padding_mask=key_padding_mask, need_weights=False,
+        )
+        q = q + cross_out
+        self_q = self._modulate(
+            self.self_norm(q), self_shift, self_scale)
+        self_out, _ = self.self_attn(
+            self_q, self_q, self_q, need_weights=False)
+        q = q + self_out
+        q = q + self.ff(self._modulate(
+            self.ff_norm(q), ff_shift, ff_scale))
+        return q
+
+
+class PureELLALongConnector(nn.Module):
+    """Gemma -> fixed-length, timestep-aware SD1.5 conditioning.
+
+    Long context belongs on the Gemma input side. The connector deliberately
+    preserves SD1.5's output token count so untrained tokens cannot perturb the
+    U-Net cross-attention softmax.
     """
     def __init__(
         self,
         gemma_dim: int = 640,
         width: int = 768,
-        context_tokens: int = 128,
+        context_tokens: int = 77,
         anchor_tokens: int = 77,
-        layers: int = 4,
+        layers: int = 6,
         heads: int = 8,
         ff_mult: int = 4,
         dropout: float = 0.0,
         time_embed_dim: int = 768,
         extra_gate_init: float = -5.0,
+        gemma_layer_mix_count: int = 1,
     ):
         super().__init__()
-        assert context_tokens >= anchor_tokens
+        if context_tokens != anchor_tokens:
+            raise ValueError(
+                "ella_tsc preserves the pretrained U-Net token contract; "
+                "context_tokens must equal anchor_tokens"
+            )
         self.context_tokens = int(context_tokens)
         self.anchor_tokens = int(anchor_tokens)
+        self.gemma_layer_mix_count = int(gemma_layer_mix_count)
+        if self.gemma_layer_mix_count < 1:
+            raise ValueError("gemma_layer_mix_count must be positive")
+        mix_init = torch.full((self.gemma_layer_mix_count,), -4.0)
+        mix_init[-1] = 0.0
+        self.layer_mix_logits = nn.Parameter(mix_init)
         self.input_proj = nn.Linear(gemma_dim, width)
         self.input_norm = nn.LayerNorm(width)
         self.query_tokens = nn.Parameter(torch.randn(1, context_tokens, width) * 0.02)
@@ -89,14 +151,12 @@ class PureELLALongConnector(nn.Module):
             nn.Linear(time_embed_dim, width),
         )
         self.blocks = nn.ModuleList([
-            ELLAConnectorBlock(width, heads, ff_mult, dropout) for _ in range(layers)
+            TimestepAwareConnectorBlock(width, heads, ff_mult, dropout)
+            for _ in range(layers)
         ])
         self.final_norm = nn.LayerNorm(width)
         self.out = nn.Linear(width, width)
-        if context_tokens > anchor_tokens:
-            self.extra_gate_logit = nn.Parameter(torch.tensor(float(extra_gate_init)))
-        else:
-            self.extra_gate_logit = None
+        self.extra_gate_logit = None
 
     @staticmethod
     def timestep_embedding(timesteps, dim: int = 320, max_period: int = 10000):
@@ -110,29 +170,42 @@ class PureELLALongConnector(nn.Module):
             emb = F.pad(emb, (0, 1))
         return emb
 
+    def _mix_gemma_layers(self, gemma_h):
+        if gemma_h.ndim == 3:
+            if self.gemma_layer_mix_count != 1:
+                raise ValueError(
+                    "Connector expects stacked Gemma layers with shape [B, K, L, D]"
+                )
+            return gemma_h
+        if gemma_h.ndim != 4:
+            raise ValueError("Gemma states must have shape [B, L, D] or [B, K, L, D]")
+        if gemma_h.shape[1] != self.gemma_layer_mix_count:
+            raise ValueError(
+                f"Expected {self.gemma_layer_mix_count} Gemma layers, got {gemma_h.shape[1]}"
+            )
+        weights = torch.softmax(self.layer_mix_logits, dim=0).to(
+            device=gemma_h.device, dtype=gemma_h.dtype)
+        return (gemma_h * weights[None, :, None, None]).sum(dim=1)
+
     def forward(self, gemma_h, timesteps, gemma_mask=None, context_tokens=None):
         context_tokens = int(context_tokens or self.context_tokens)
-        if context_tokens > self.context_tokens:
+        if context_tokens != self.context_tokens:
             raise ValueError(
-                f"Requested context_tokens={context_tokens}, "
-                f"but connector was built for max_context_tokens={self.context_tokens}."
+                f"ella_tsc has a fixed output length of {self.context_tokens}, "
+                f"got {context_tokens}"
             )
+        gemma_h = self._mix_gemma_layers(gemma_h)
         kv = self.input_norm(self.input_proj(gemma_h.to(dtype=self.input_proj.weight.dtype)))
         q = self.query_tokens[:, :context_tokens, :] + self.pos_emb[:, :context_tokens, :]
         q = q.expand(gemma_h.shape[0], -1, -1)
         temb = self.time_mlp(
             self.timestep_embedding(timesteps, self.time_mlp[0].in_features).to(device=q.device, dtype=q.dtype)
-        )[:, None, :]
-        q = q + temb
+        )
         key_padding_mask = None if gemma_mask is None else ~gemma_mask.to(device=q.device, dtype=torch.bool)
         x = q
         for block in self.blocks:
-            x = block(x, kv, key_padding_mask=key_padding_mask)
+            x = block(x, kv, temb, key_padding_mask=key_padding_mask)
         x = self.out(self.final_norm(x))
-        if self.extra_gate_logit is not None and context_tokens > self.anchor_tokens:
-            base = x[:, :self.anchor_tokens, :]
-            extra = x[:, self.anchor_tokens:, :] * torch.sigmoid(self.extra_gate_logit).to(dtype=x.dtype)
-            x = torch.cat([base, extra], dim=1)
         return x
 
 
@@ -164,6 +237,7 @@ class RecursiveYConnector(PureELLALongConnector):
         y = super().forward(gemma_h, timesteps, gemma_mask=gemma_mask, context_tokens=context_tokens)
         if self.recursive_y_steps <= 0:
             return y
+        gemma_h = self._mix_gemma_layers(gemma_h)
         kv = self.input_norm(self.input_proj(gemma_h.to(dtype=self.input_proj.weight.dtype)))
         key_padding_mask = None if gemma_mask is None else ~gemma_mask.to(device=y.device, dtype=torch.bool)
         gate = torch.sigmoid(self.recursive_y_gate_logit).to(dtype=y.dtype)
@@ -199,6 +273,7 @@ class TRMYZConnector(nn.Module):
         trm_scratch_tokens: int = 32,
         trm_y_gate_init: float = -2.0,
         trm_z_gate_init: float = -1.0,
+        gemma_layer_mix_count: int = 1,
     ):
         super().__init__()
         assert context_tokens >= anchor_tokens
@@ -259,6 +334,8 @@ class TRMYZConnector(nn.Module):
         context_tokens = int(context_tokens or self.context_tokens)
         if context_tokens > self.context_tokens:
             raise ValueError(f"Requested context_tokens={context_tokens}, max is {self.context_tokens}")
+        if gemma_h.ndim == 4:
+            gemma_h = gemma_h[:, -1]
         x = self.input_norm(self.input_proj(gemma_h.to(dtype=self.input_proj.weight.dtype)))
         pooled = self._masked_mean(x, gemma_mask)
         temb = self.time_mlp(
@@ -298,6 +375,7 @@ class TRMYZConnector(nn.Module):
 _BASE_CONNECTOR_KEYS = {
     "gemma_dim", "width", "context_tokens", "anchor_tokens",
     "layers", "heads", "ff_mult", "dropout", "time_embed_dim", "extra_gate_init",
+    "gemma_layer_mix_count",
 }
 
 

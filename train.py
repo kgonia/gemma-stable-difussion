@@ -69,7 +69,6 @@ from pure_ella.diagnostics import (
     _to_float_maybe,
     connector_extra_grad_stats,
     suffix_counterfactual_sensitivity,
-    suffix_counterfactual_contrastive_loss,
     summarize_context_tokens,
     zero_extra_tokens,
     generate_case_image,
@@ -146,6 +145,34 @@ def estimate_steps(max_samples: int, batch_size: int, epochs: int,
         effective=effective,
         image_exposures=effective * int(batch_size),
     )
+
+
+def masked_mse(prediction: torch.Tensor, target: torch.Tensor,
+               image_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """MSE over real image content, excluding full-frame bucket padding."""
+    error = (prediction.float() - target.float()).pow(2)
+    if image_mask is None:
+        return error.mean()
+    mask = F.interpolate(
+        image_mask.float(), size=prediction.shape[-2:], mode="nearest")
+    mask = mask.to(device=prediction.device, dtype=error.dtype)
+    denominator = mask.sum().clamp_min(1.0) * prediction.shape[1]
+    return (error * mask).sum() / denominator
+
+
+def apply_conditioning_dropout(captions, probability: float):
+    captions = _as_prompt_list(captions)
+    if probability <= 0:
+        return captions
+    dropped = torch.rand(len(captions)) < probability
+    return ["" if bool(drop) else caption
+            for caption, drop in zip(captions, dropped)]
+
+
+def clip_scaffold_scale(cfg: TrainConfig, step: int) -> float:
+    if cfg.clip_teacher_decay_steps <= 0:
+        return 1.0
+    return max(0.0, 1.0 - step / cfg.clip_teacher_decay_steps)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +264,7 @@ def build_ella_connector(state: TrainingState):
         "dropout": cfg.connector_dropout,
         "time_embed_dim": cfg.connector_time_embed_dim,
         "extra_gate_init": cfg.connector_extra_gate_init,
+        "gemma_layer_mix_count": cfg.gemma_layer_mix_count,
         "recursive_y_steps": cfg.recursive_y_steps,
         "recursive_y_gate_init": cfg.recursive_y_gate_init,
         "trm_outer_steps": cfg.trm_outer_steps,
@@ -249,8 +277,9 @@ def build_ella_connector(state: TrainingState):
         device=state.device, dtype=state.unet_dtype)
 
     with torch.no_grad():
-        g = torch.randn(2, 32, state.gemma_hidden_size,
-                        device=state.device, dtype=state.unet_dtype)
+        g = torch.randn(
+            2, cfg.gemma_layer_mix_count, 32, state.gemma_hidden_size,
+            device=state.device, dtype=state.unet_dtype)
         m = torch.ones(2, 32, device=state.device, dtype=torch.long)
         t = torch.tensor([10, 500], device=state.device).long()
         y = state.connector(g, t, m)
@@ -287,13 +316,19 @@ def make_encode_gemma(state: TrainingState):
         out = state.gemma_model(**toks, output_hidden_states=True,
                                 use_cache=False)
         layers = out.hidden_states
-        idx = state.cfg.gemma_layer_index
-        idx = idx if idx >= 0 else len(layers) + idx
-        if idx < 0 or idx >= len(layers):
+        end = state.cfg.gemma_layer_index
+        end = end if end >= 0 else len(layers) + end
+        if end < 0 or end >= len(layers):
             raise IndexError(
                 f"GEMMA_LAYER_INDEX={state.cfg.gemma_layer_index} "
                 f"invalid for {len(layers)} hidden states")
-        h = layers[idx].to(device=state.device)
+        start = end - state.cfg.gemma_layer_mix_count + 1
+        if start < 0:
+            raise IndexError(
+                f"Cannot mix {state.cfg.gemma_layer_mix_count} layers ending "
+                f"at hidden-state index {end}"
+            )
+        h = torch.stack(layers[start:end + 1], dim=1).to(device=state.device)
         m = toks.attention_mask.to(device=state.device)
         return h, m
     return encode_gemma
@@ -380,7 +415,8 @@ def run_clip_pretrain(state: TrainingState):
             max_samples=cfg.max_samples_pretrain,
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
-            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed)
+            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
+            buckets=cfg.aspect_ratio_buckets)
         progress = tqdm(dl, desc=f"CLIP-pretrain {epoch+1}/{cfg.pretrain_epochs}")
         for batch in progress:
             captions = _as_prompt_list(batch["caption"])
@@ -504,7 +540,9 @@ def run_ella_training(state: TrainingState):
         state.connector.parameters(), lr=cfg.ella_lr,
         weight_decay=0.01, eps=1e-6)
     use_teacher_delta = bool(
-        cfg.use_clip_teacher_delta and state.clip_model is not None)
+        cfg.use_clip_teacher_delta
+        and (cfg.lambda_teacher > 0 or cfg.lambda_text_delta > 0)
+        and state.clip_model is not None)
     print("Phase 1 forward mode:",
           "paired_cfg_teacher" if use_teacher_delta else "conditional_only")
 
@@ -514,6 +552,8 @@ def run_ella_training(state: TrainingState):
     state.gemma_model.eval()
     if state.clip_model is not None:
         state.clip_model.eval()
+    clip_geom = (ClipGeometryLoss()
+                 if cfg.phase1_semantic_anchor_weight > 0 else None)
 
     plan = estimate_steps(cfg.max_samples_ella, cfg.train_batch_size,
                           cfg.ella_epochs, cfg.ella_max_opt_steps)
@@ -536,12 +576,17 @@ def run_ella_training(state: TrainingState):
             max_samples=cfg.max_samples_ella,
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
-            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed)
+            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
+            buckets=cfg.aspect_ratio_buckets)
         progress = tqdm(dl, desc=f"ELLA {epoch+1}/{cfg.ella_epochs}")
         for batch in progress:
-            captions = _as_prompt_list(batch["caption"])
+            captions = apply_conditioning_dropout(
+                batch["caption"], cfg.conditioning_dropout_prob)
             img = batch["image"].to(device=state.device,
                                      dtype=state.unet_dtype)
+            image_mask = batch.get("image_mask")
+            if image_mask is not None:
+                image_mask = image_mask.to(device=state.device)
 
             with torch.no_grad():
                 latent = (state.vae.encode(img).latent_dist.sample()
@@ -571,7 +616,7 @@ def run_ella_training(state: TrainingState):
                 student_pair = state.unet(
                     noisy_pair, t_pair, encoder_hidden_states=ctx).sample
                 student_cond, student_uncond = student_pair.chunk(2)
-                loss_diff = F.mse_loss(student_cond.float(), noise.float())
+                loss_diff = masked_mse(student_cond, noise, image_mask)
 
                 with torch.no_grad():
                     ch, cm = state.encode_clip(captions)
@@ -585,42 +630,30 @@ def run_ella_training(state: TrainingState):
                     teacher_cond, teacher_uncond = teacher_pair.chunk(2)
                     teacher_delta = teacher_cond - teacher_uncond
                 student_delta = student_cond - student_uncond
-                loss_teacher = F.mse_loss(
-                    student_cond.float(), teacher_cond.float())
-                loss_delta = F.mse_loss(
-                    student_delta.float(), teacher_delta.float())
+                loss_teacher = masked_mse(
+                    student_cond, teacher_cond, image_mask)
+                loss_delta = masked_mse(
+                    student_delta, teacher_delta, image_mask)
             else:
                 ctx = state.connector(
                     gh.to(dtype=state.unet_dtype), t, gm,
                     context_tokens=cfg.context_tokens)
                 student_cond = state.unet(
                     noisy, t, encoder_hidden_states=ctx).sample
-                loss_diff = F.mse_loss(student_cond.float(), noise.float())
+                loss_diff = masked_mse(student_cond, noise, image_mask)
 
             if (cfg.phase1_semantic_anchor_weight > 0
                     and state.clip_model is not None):
-                clip_geom = ClipGeometryLoss()
                 with torch.no_grad():
                     ch, cm = state.encode_clip(captions)
                 pred77 = ctx[:len(captions), :cfg.clip_anchor_tokens, :]
                 loss_anchor = clip_geom(pred77, ch, cm)["total"]
 
+            scaffold_scale = clip_scaffold_scale(cfg, opt_step)
             loss = (cfg.lambda_diffusion * loss_diff
-                    + cfg.lambda_teacher * loss_teacher
-                    + cfg.lambda_text_delta * loss_delta
-                    + cfg.phase1_semantic_anchor_weight * loss_anchor)
-
-            # ── suffix counterfactual contrastive loss (training pressure) ──
-            loss_suffix_cf = loss.new_tensor(0.0)
-            if (cfg.suffix_counterfactual_loss_weight > 0
-                    and cfg.suffix_counterfactual_loss_every > 0
-                    and (opt_step + 1) % cfg.suffix_counterfactual_loss_every == 0
-                    and cfg.context_tokens > cfg.clip_anchor_tokens):
-                loss_suffix_cf = suffix_counterfactual_contrastive_loss(
-                    state, margin=cfg.suffix_counterfactual_loss_margin)
-                if not torch.isfinite(loss_suffix_cf):
-                    raise RuntimeError("suffix_counterfactual_contrastive_loss NaN/Inf")
-                loss = loss + cfg.suffix_counterfactual_loss_weight * loss_suffix_cf
+                    + scaffold_scale * cfg.lambda_teacher * loss_teacher
+                    + scaffold_scale * cfg.lambda_text_delta * loss_delta
+                    + scaffold_scale * cfg.phase1_semantic_anchor_weight * loss_anchor)
 
             if not torch.isfinite(loss):
                 raise RuntimeError("ELLA loss NaN/Inf")
@@ -632,7 +665,7 @@ def run_ella_training(state: TrainingState):
                 "loss_teacher": float(loss_teacher.item()),
                 "loss_delta": float(loss_delta.item()),
                 "loss_anchor": float(loss_anchor.item()),
-                "loss_suffix_cf": float(loss_suffix_cf.item()),
+                "clip_scaffold_scale": scaffold_scale,
             }
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -653,7 +686,7 @@ def run_ella_training(state: TrainingState):
                     "ella/loss_teacher": float(loss_teacher.item()),
                     "ella/loss_delta": float(loss_delta.item()),
                     "ella/loss_anchor": float(loss_anchor.item()),
-                    "ella/loss_suffix_cf": float(loss_suffix_cf.item()),
+                    "ella/clip_scaffold_scale": scaffold_scale,
                     "ella/extra_gate_grad_norm":
                         grad_stats["extra_gate_grad_norm"]
                         if grad_stats["extra_gate_grad_norm"] is not None
@@ -783,7 +816,8 @@ def run_sara_training(state: TrainingState):
 
     use_teacher_delta_phase2 = bool(
         cfg.use_clip_teacher_delta and cfg.use_clip_teacher_delta_phase2
-        and state.clip_model is not None,
+        and (cfg.lambda_teacher > 0 or cfg.lambda_text_delta > 0)
+        and state.clip_model is not None
     )
     if cfg.use_clip_teacher_delta and not use_teacher_delta_phase2:
         print("Phase 2 CLIP teacher delta disabled to avoid moving-teacher distillation.")
@@ -796,8 +830,10 @@ def run_sara_training(state: TrainingState):
     state.gemma_model.eval()
     if state.clip_model is not None:
         state.clip_model.eval()
+    clip_geom = (ClipGeometryLoss()
+                 if cfg.phase2_semantic_anchor_weight > 0 else None)
 
-    plan = estimate_steps(cfg.max_samples_ella, cfg.train_batch_size,
+    plan = estimate_steps(cfg.max_samples_sara, cfg.train_batch_size,
                           cfg.sara_epochs, cfg.sara_max_opt_steps)
     plan.name = "ella_sara_attn2_kv"
     plan.print()
@@ -814,14 +850,19 @@ def run_sara_training(state: TrainingState):
     for epoch in range(cfg.sara_epochs):
         dl = make_streaming_dataloader(
             cfg.stream_repo, phase=30, epoch=epoch,
-            max_samples=cfg.max_samples_ella,
+            max_samples=cfg.max_samples_sara,
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
-            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed)
+            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
+            buckets=cfg.aspect_ratio_buckets)
         progress = tqdm(dl, desc=f"ELLA+SaRA {epoch+1}/{cfg.sara_epochs}")
         for batch in progress:
-            captions = _as_prompt_list(batch["caption"])
+            captions = apply_conditioning_dropout(
+                batch["caption"], cfg.conditioning_dropout_prob)
             img = batch["image"].to(device=state.device, dtype=state.unet_dtype)
+            image_mask = batch.get("image_mask")
+            if image_mask is not None:
+                image_mask = image_mask.to(device=state.device)
 
             with torch.no_grad():
                 latent = (state.vae.encode(img).latent_dist.sample()
@@ -851,7 +892,7 @@ def run_sara_training(state: TrainingState):
                 student_pair = state.unet(
                     noisy_pair, t_pair, encoder_hidden_states=ctx).sample
                 student_cond, student_uncond = student_pair.chunk(2)
-                loss_diff = F.mse_loss(student_cond.float(), noise.float())
+                loss_diff = masked_mse(student_cond, noise, image_mask)
 
                 with torch.no_grad():
                     ch, cm = state.encode_clip(captions)
@@ -865,30 +906,30 @@ def run_sara_training(state: TrainingState):
                     teacher_cond, teacher_uncond = teacher_pair.chunk(2)
                     teacher_delta = teacher_cond - teacher_uncond
                 student_delta = student_cond - student_uncond
-                loss_teacher = F.mse_loss(
-                    student_cond.float(), teacher_cond.float())
-                loss_delta = F.mse_loss(
-                    student_delta.float(), teacher_delta.float())
+                loss_teacher = masked_mse(
+                    student_cond, teacher_cond, image_mask)
+                loss_delta = masked_mse(
+                    student_delta, teacher_delta, image_mask)
             else:
                 ctx = state.connector(
                     gh.to(dtype=state.unet_dtype), t, gm,
                     context_tokens=cfg.context_tokens)
                 student_cond = state.unet(
                     noisy, t, encoder_hidden_states=ctx).sample
-                loss_diff = F.mse_loss(student_cond.float(), noise.float())
+                loss_diff = masked_mse(student_cond, noise, image_mask)
 
             if (cfg.phase2_semantic_anchor_weight > 0
                     and state.clip_model is not None):
-                clip_geom = ClipGeometryLoss()
                 with torch.no_grad():
                     ch, cm = state.encode_clip(captions)
                 pred77 = ctx[:len(captions), :cfg.clip_anchor_tokens, :]
                 loss_anchor = clip_geom(pred77, ch, cm)["total"]
 
+            scaffold_scale = clip_scaffold_scale(cfg, opt_step)
             loss = (cfg.lambda_diffusion * loss_diff
-                    + cfg.lambda_teacher * loss_teacher
-                    + cfg.lambda_text_delta * loss_delta
-                    + cfg.phase2_semantic_anchor_weight * loss_anchor)
+                    + scaffold_scale * cfg.lambda_teacher * loss_teacher
+                    + scaffold_scale * cfg.lambda_text_delta * loss_delta
+                    + scaffold_scale * cfg.phase2_semantic_anchor_weight * loss_anchor)
             if not torch.isfinite(loss):
                 raise RuntimeError("ELLA+SaRA loss NaN/Inf")
 
@@ -1142,6 +1183,7 @@ def run_reload_proof(state: TrainingState):
         dropout=cfg.connector_dropout,
         time_embed_dim=cfg.connector_time_embed_dim,
         extra_gate_init=cfg.connector_extra_gate_init,
+        gemma_layer_mix_count=cfg.gemma_layer_mix_count,
         recursive_y_steps=cfg.recursive_y_steps,
         recursive_y_gate_init=cfg.recursive_y_gate_init,
         trm_outer_steps=cfg.trm_outer_steps,
@@ -1309,13 +1351,18 @@ def _load_connector_checkpoint(state: TrainingState, ckpt_path: str):
     if sd is None:
         print("Checkpoint has no connector_state_dict")
         return False
-    missing, unexpected = state.connector.load_state_dict(sd, strict=False)
+    strict = not state.cfg.init_connector_partial_warmstart
+    try:
+        missing, unexpected = state.connector.load_state_dict(sd, strict=strict)
+    except RuntimeError as error:
+        print(f"Checkpoint is incompatible with the configured connector: {error}")
+        return False
     if missing:
         print(f"WARNING: missing keys ({len(missing)}): {missing[:5]}…")
     if unexpected:
         print(f"WARNING: unexpected keys ({len(unexpected)}): {unexpected[:5]}…")
     stage = ckpt.get("stage", "unknown")
-    print(f"Loaded connector from {ckpt_path} (stage={stage})")
+    print(f"Loaded connector from {ckpt_path} (stage={stage}, strict={strict})")
     return True
 
 
@@ -1384,7 +1431,9 @@ def main():
     cfg.print_plan()
 
     load_gemma(state)
-    if cfg.run_clip_alignment_pretrain or cfg.use_clip_teacher_delta:
+    if (cfg.run_clip_alignment_pretrain or cfg.use_clip_teacher_delta
+            or cfg.phase1_semantic_anchor_weight > 0
+            or cfg.phase2_semantic_anchor_weight > 0):
         load_clip(state)
     load_stylejourney(state)
     state.encode_gemma = make_encode_gemma(state)
@@ -1397,10 +1446,12 @@ def main():
             cfg.stream_repo, phase=1, epoch=0,
             max_samples=max(cfg.max_samples_ella, 4), batch_size=4,
             shuffle=cfg.shuffle_streaming,
-            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed)
+            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
+            buckets=cfg.aspect_ratio_buckets)
         batch = next(iter(dl))
         state.overfit_eval_batch = {
             "image": batch["image"],
+            "image_mask": batch["image_mask"],
             "caption": _as_prompt_list(batch["caption"]),
         }
         print("Exact overfit captions:")

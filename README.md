@@ -8,12 +8,13 @@ timestep-aware connector. Final inference is CLIP-free: `Gemma → connector →
 ```
 Gemma 3 270M (frozen)
   → Timestep-aware ELLA connector (trainable)
-  → [B, L, 768] context tokens (L = 77, 128, 192, or 256)
+  → [B, 77, 768] SD1.5-compatible conditioning tokens
   → Original StyleJourney SD 1.5 UNet cross-attention (frozen)
 ```
 
 CLIP is used as an optional teacher/diagnostic during training but is not loaded
-at inference time.
+at inference time. `max_gemma_len`, rather than the U-Net conditioning length,
+controls long-prompt support; the default reads 256 Gemma tokens.
 
 ## Quick start
 
@@ -21,17 +22,12 @@ at inference time.
 # 1. Install dependencies
 uv sync
 
-# 2. Run with default config (short 77-token train)
+# 2. Train the 256-Gemma-input / 77-SD-token baseline
 python train.py config.json
 
-# 3. Full train on 50k samples
-python train.py --config config.json   # set run_mode to "full_train" in config
-
-# 4. Long-context 128-token train
-python train.py --config config.json   # set experiment_stage to "stage2_long_context_no_sara"
-
-# 5. Overfit falsifier (64 samples, deterministic order)
-python train.py --config config.json   # set run_mode to "overfit_train"
+# 3. Resume ELLA training after a completed compatibility pretrain
+python train.py config.json --phases ella \
+    --resume-ckpt output/ella_connector_clip_pretrain.pt
 ```
 
 ## Configuration
@@ -40,13 +36,19 @@ Edit `config.json` or pass a custom path. Key settings:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `experiment_stage` | `stage1_77_pretrain_then_ella` | `stage2_long_context_no_sara`, `stage3_long_context_with_sara` |
+| `experiment_stage` | `stage2_long_context_no_sara` | `stage3_long_context_with_sara` enables the optional SaRA phase |
 | `run_mode` | `short_train` | `diagnostic`, `overfit_train`, `short_train`, `full_train` |
-| `connector_type` | `trm_yz` | `ella_tsc`, `recursive_y`, `trm_yz` |
-| `context_tokens` | 77 | 77 for phase 1; 128/192/256 for long-context stages |
+| `connector_type` | `ella_tsc` | ELLA-style fixed-query timestep-aware resampler |
+| `max_gemma_len` | 256 | Maximum Gemma input length for dense captions |
+| `context_tokens` | 77 | Fixed SD1.5 cross-attention contract; output expansion is rejected |
+| `gemma_layer_mix_count` | 4 | Learned mixture of upper Gemma hidden layers |
+| `aspect_ratio_buckets` | five buckets | Full-frame resize-and-pad buckets; images are not cropped |
 | `gemma_id` | `google/gemma-3-270m-it` | Gated model — needs HF token |
 | `sd_checkpoint` | `""` | Path to `.safetensors` file; empty = runwayml SD 1.5 |
-| `wandb_enabled` | `true` | Requires `WANDB_API_KEY` env var |
+| `wandb_enabled` | `false` | Requires `WANDB_API_KEY` when enabled |
+
+`run_mode` controls whether training runs; sample and step budgets are always
+explicit configuration values and are never silently overwritten by the mode.
 
 ## Training phases
 
@@ -55,13 +57,22 @@ Edit `config.json` or pass a custom path. Key settings:
    pool cosine, norm).
 
 2. **ELLA connector diffusion training** — Phase 1. Trains the connector
-   end-to-end with diffusion noise-prediction loss, optional CLIP teacher
-   distillation, optional text-delta alignment, and optional semantic anchor
-   loss. UNet is frozen.
+   end-to-end with the standard diffusion noise-prediction loss and 10% CFG
+   conditioning dropout. The U-Net is frozen. Optional CLIP compatibility
+   losses are temporary scaffolding and decay during training.
 
-3. **Sparse SaRA attn2 K/V adaptation** — Phase 2 (stub). Sparse gradient
-   masked fine-tuning of UNet cross-attention weights. Only activated at
+3. **Sparse SaRA attn2 K/V adaptation** — Phase 2. Sparse gradient-masked
+   fine-tuning of the undertrained (|w| < threshold) UNet cross-attention K/V
+   weights, with warn/abort gates on the sparse fraction and a removable
+   sparse-patch checkpoint format. Only activated at
    `stage3_long_context_with_sara`.
+
+Phases can be selected and resumed from the CLI:
+
+```bash
+python train.py config_long_256.json --phases ella \
+    --resume-ckpt output/ella_connector_clip_pretrain.pt
+```
 
 ## Output
 
@@ -69,7 +80,8 @@ All artifacts land in `output_dir` (default `./output`):
 
 - `ella_connector_clip_pretrain.pt` — after pretrain
 - `ella_connector_frozen_unet.pt` — after ELLA training
-- `pure_ella_connector_L{77,128,192,256}.pt` — final deliverable
+- `pure_ella_connector_L77.pt` — final Gemma-long-input / SD1.5-compatible connector
+- `pure_ella_unet_attn2_kv_sparse_L*.pt` — SaRA sparse UNet patch (stage 3 only)
 - `validation_ella_L*.png` — validation grids
 - `proof_reloaded_pure_ella_L*.png` — CLIP-free reloaded proof grids
 - `validation_clip_teacher.png` — teacher baseline (CLIP available)
@@ -87,6 +99,16 @@ Python ≥ 3.10, managed by [uv](https://docs.astral.sh/uv/):
 |----------|----------|---------|
 | `HF_TOKEN` | Yes (Gemma is gated) | HuggingFace auth for model downloads |
 | `WANDB_API_KEY` | Only if `wandb_enabled: true` | Weights & Biases logging |
+
+## Roadmap and code review
+
+- [`docs/PLAN.md`](docs/PLAN.md) — the four-pillar roadmap: long Gemma input,
+  optional SaRA widening, camera-intrinsics / capture-metadata conditioning,
+  and optional zero-gated DiT-style UNet capacity. The implemented baseline
+  preserves 77 U-Net conditioning tokens while Gemma reads 256 tokens.
+- [`docs/REVIEW.md`](docs/REVIEW.md) — code review findings backing the plan's
+  Phase 0 fix list (known bugs, refactors, and config hazards with file:line
+  references).
 
 ## Colab notebook
 

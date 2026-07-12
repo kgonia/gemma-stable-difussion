@@ -21,7 +21,7 @@ class TrainConfig:
     """All configuration fields with defaults matching the notebook."""
 
     # --- Experiment stage ---
-    experiment_stage: str = "stage1_77_pretrain_then_ella"  # stage1_77_pretrain_then_ella, stage2_long_context_no_sara, stage3_long_context_with_sara
+    experiment_stage: str = "stage2_long_context_no_sara"  # stage1_77_pretrain_then_ella, stage2_long_context_no_sara, stage3_long_context_with_sara
     run_mode: str = "short_train"  # diagnostic, overfit_train, short_train, full_train
     run_training: bool = True
     run_final_proof: bool = True
@@ -33,16 +33,18 @@ class TrainConfig:
 
     # --- CLIP scaffold ---
     run_clip_alignment_pretrain: bool = True
-    use_clip_teacher_delta: bool = True
+    use_clip_teacher_delta: bool = False
     use_clip_teacher_delta_phase2: bool = False
     enable_unet_gradient_checkpointing: bool = True
-    phase1_semantic_anchor_weight: float = 0.05
+    phase1_semantic_anchor_weight: float = 0.0
     phase2_semantic_anchor_weight: float = 0.0
 
-    # --- Context tokens ---
-    context_tokens: int = 77  # 77, 128, 192, or 256
+    # --- Text input and U-Net conditioning contracts ---
+    # Gemma may read a long prompt while the connector preserves SD1.5's
+    # fixed 77-token cross-attention contract.
+    context_tokens: int = 77
     clip_anchor_tokens: int = 77  # always 77 for SD1.5
-    long_context_target: int = 128  # used only when experiment_stage is stage2/stage3
+    long_context_target: int = 256  # deprecated alias retained for old configs
 
     # --- SaRA phase ---
     run_sara_phase: bool = False
@@ -65,14 +67,15 @@ class TrainConfig:
     # --- Model IDs ---
     gemma_id: str = "google/gemma-3-270m-it"
     gemma_layer_index: int = -1
+    gemma_layer_mix_count: int = 4
     max_gemma_len: int = 256
     clip_id: str = "openai/clip-vit-large-patch14"
     sd_checkpoint: str = ""  # path to .safetensors SD checkpoint, empty = use runwayml/stable-diffusion-v1-5
 
     # --- Connector ---
-    connector_type: str = "trm_yz"  # ella_tsc, recursive_y, trm_yz
+    connector_type: str = "ella_tsc"  # ella_tsc is the supported baseline
     connector_width: int = 768
-    connector_layers: int = 4
+    connector_layers: int = 6
     connector_heads: int = 8
     connector_ff_mult: int = 4
     connector_dropout: float = 0.0
@@ -86,7 +89,7 @@ class TrainConfig:
     trm_y_gate_init: float = -2.0
     trm_z_gate_init: float = -1.0
     init_connector_ckpt_path: str = ""
-    init_connector_partial_warmstart: bool = True
+    init_connector_partial_warmstart: bool = False
     require_stage2_warmstart: bool = False
 
     # --- Learning rates ---
@@ -96,6 +99,7 @@ class TrainConfig:
     lambda_diffusion: float = 1.0
     lambda_teacher: float = 0.5
     lambda_text_delta: float = 1.0
+    clip_teacher_decay_steps: int = 5000
 
     # --- SaRA ---
     sara_scope: str = "attn2_kv_sparse"
@@ -109,6 +113,11 @@ class TrainConfig:
     shuffle_buffer: int = 10000
     grad_clip_norm: float = 0.5
     stream_repo: str = "jackyhate/text-to-image-2M"
+    aspect_ratio_buckets: List[List[int]] = field(default_factory=lambda: [
+        [512, 512], [576, 448], [640, 384],
+        [448, 576], [384, 640],
+    ])
+    conditioning_dropout_prob: float = 0.1
 
     # --- Quality metrics ---
     run_image_quality_metrics: bool = True
@@ -207,44 +216,38 @@ class TrainConfig:
         """Derive computed fields."""
         self.run_training = self.run_mode in {"overfit_train", "short_train", "full_train"}
         self.run_sara_phase = self.experiment_stage == "stage3_long_context_with_sara"
-        self.run_reloaded_long_proof = self.context_tokens > self.clip_anchor_tokens
+        self.run_reloaded_long_proof = self.max_gemma_len > self.clip_anchor_tokens
 
-        # Resolve context_tokens from experiment_stage
-        if self.experiment_stage == "stage1_77_pretrain_then_ella":
-            self.context_tokens = 77
-        elif self.experiment_stage in {"stage2_long_context_no_sara", "stage3_long_context_with_sara"}:
-            self.context_tokens = self.long_context_target
-        else:
+        if self.experiment_stage not in {
+            "stage1_77_pretrain_then_ella",
+            "stage2_long_context_no_sara",
+            "stage3_long_context_with_sara",
+        }:
             raise ValueError(f"Unknown experiment_stage: {self.experiment_stage}")
-
-        assert self.context_tokens in {77, 128, 192, 256}
-        assert self.context_tokens >= self.clip_anchor_tokens
-
-        # Run mode overrides
-        if self.run_mode == "overfit_train":
-            self.max_samples_pretrain = 64
-            self.max_samples_ella = 64
-            self.pretrain_epochs = 20
-            self.ella_epochs = 40
-            self.sara_epochs = 20
-            self.pretrain_max_opt_steps = 300
-            self.ella_max_opt_steps = 600
-            self.sara_max_opt_steps = 400
-            self.validation_every_opt_steps = 50
-            self.shuffle_streaming = False
-        elif self.run_mode == "diagnostic":
-            self.max_samples_pretrain = 128
-            self.max_samples_ella = 128
-            self.pretrain_epochs = 0
-            self.ella_epochs = 0
-            self.sara_epochs = 0
-            self.pretrain_max_opt_steps = 0
-            self.ella_max_opt_steps = 0
-            self.sara_max_opt_steps = 0
-            self.validation_every_opt_steps = 0
-            self.shuffle_streaming = True
-
-        self.quality_every_opt_steps = self.validation_every_opt_steps
+        if self.context_tokens != self.clip_anchor_tokens:
+            raise ValueError(
+                "The supported connector preserves SD1.5's 77-token conditioning "
+                "contract. Set context_tokens == clip_anchor_tokens; use "
+                "max_gemma_len for long prompts."
+            )
+        if self.max_gemma_len < self.clip_anchor_tokens:
+            raise ValueError("max_gemma_len must be at least clip_anchor_tokens")
+        if self.gemma_layer_mix_count < 1:
+            raise ValueError("gemma_layer_mix_count must be positive")
+        if not 0.0 <= self.conditioning_dropout_prob < 1.0:
+            raise ValueError("conditioning_dropout_prob must be in [0, 1)")
+        if self.suffix_counterfactual_loss_weight != 0.0:
+            raise ValueError(
+                "suffix_counterfactual_loss_weight is directionless and is no "
+                "longer supported as a training objective"
+            )
+        if not self.aspect_ratio_buckets:
+            raise ValueError("aspect_ratio_buckets must not be empty")
+        for bucket in self.aspect_ratio_buckets:
+            if len(bucket) != 2 or any(int(v) <= 0 or int(v) % 8 for v in bucket):
+                raise ValueError(
+                    f"Invalid aspect-ratio bucket {bucket}; dimensions must be positive multiples of 8"
+                )
 
         # Resolve SD checkpoint
         if not self.sd_checkpoint:
@@ -257,7 +260,8 @@ class TrainConfig:
     def print_plan(self):
         """Print a readable plan summary."""
         print(f"Experiment: {self.experiment_stage} run_mode={self.run_mode}")
-        print(f"Context tokens: {self.context_tokens} anchor={self.clip_anchor_tokens}")
+        print(f"Gemma input tokens: {self.max_gemma_len}")
+        print(f"UNet conditioning tokens: {self.context_tokens} anchor={self.clip_anchor_tokens}")
         print(f"Connector: {self.connector_type}")
         print(f"CLIP pretrain: {self.run_clip_alignment_pretrain} (max_steps={self.pretrain_max_opt_steps})")
         print(f"ELLA training: steps≤{self.ella_max_opt_steps}")
@@ -270,20 +274,15 @@ class TrainConfig:
     @classmethod
     def from_json(cls, path: str) -> "TrainConfig":
         """Load config from JSON file, allows partial overrides."""
-        cfg = cls()  # defaults
-        data = {}
-        if os.path.exists(path):
-            with open(path) as f:
-                data = json.load(f)
-
-        # Apply overrides
-        for k, v in data.items():
-            if hasattr(cfg, k):
-                setattr(cfg, k, v)
-
-        # Re-derive computed fields
-        cfg.__post_init__()
-        return cfg
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Config file not found: {path}")
+        with open(path) as f:
+            data = json.load(f)
+        valid = set(cls.__dataclass_fields__)
+        unknown = sorted(set(data) - valid)
+        if unknown:
+            raise ValueError(f"Unknown config keys: {', '.join(unknown)}")
+        return cls(**data)
 
     def save_json(self, path: str):
         """Save current config to JSON."""
@@ -299,13 +298,21 @@ def resolve_sd_checkpoint(cfg: TrainConfig) -> str:
         "/content/drive/MyDrive/model/stylejourney_v10.safetensors",
     ]
     for p in candidates:
-        if p and os.path.exists(p):
-            return p
-        # Also check if it's a HuggingFace model ID (no slash prefix needed)
-        if p and not os.path.exists(p) and "/" in p:
-            return p  # assume it's a valid HF model ID
-    # Fall back to the configured checkpoint
-    return cfg.sd_checkpoint
+        expanded = os.path.expanduser(p) if p else p
+        if expanded and os.path.exists(expanded):
+            return expanded
+
+    configured = cfg.sd_checkpoint.strip()
+    looks_local = (
+        configured.startswith(("/", ".", "~"))
+        or configured.endswith((".safetensors", ".ckpt", ".pt", ".bin"))
+    )
+    if not looks_local and configured.count("/") == 1:
+        return configured
+    raise FileNotFoundError(
+        "Stable Diffusion checkpoint not found. Checked: "
+        + ", ".join(os.path.expanduser(p) for p in candidates if p)
+    )
 
 
 def seed_everything(seed: int):

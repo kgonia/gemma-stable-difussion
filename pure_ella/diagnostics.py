@@ -418,6 +418,7 @@ def fixed_overfit_loss(state, label: str = "fixed_overfit", timestep: int = 500,
     batch = state.overfit_eval_batch
     captions = batch["caption"]
     img = batch["image"].to(device=device, dtype=unet_dtype)
+    image_mask = batch.get("image_mask")
     gen = torch.Generator(device=device).manual_seed(seed)
     latent = vae.encode(img).latent_dist.sample(generator=gen) * vae.config.scaling_factor
     noise = torch.randn_like(latent)
@@ -427,7 +428,15 @@ def fixed_overfit_loss(state, label: str = "fixed_overfit", timestep: int = 500,
     gh, gm = encode_gemma(captions)
     ctx = connector(gh.to(dtype=unet_dtype), t, gm, context_tokens=cfg.context_tokens)
     pred = unet(noisy, t, encoder_hidden_states=ctx).sample
-    loss = F.mse_loss(pred.float(), noise.float()).item()
+    if image_mask is None:
+        loss = F.mse_loss(pred.float(), noise.float()).item()
+    else:
+        mask = F.interpolate(
+            image_mask.float(), size=pred.shape[-2:], mode="nearest").to(
+                device=device, dtype=pred.dtype)
+        error = (pred.float() - noise.float()).pow(2)
+        loss = ((error * mask).sum() /
+                (mask.sum().clamp_min(1.0) * pred.shape[1])).item()
     print(f"[{label}] fixed overfit MSE @t={t_val}: {loss:.6f}")
     safe_wandb_log({f"validation/{label}_mse": loss}, wandb=wandb)
     return loss

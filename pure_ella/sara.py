@@ -51,7 +51,7 @@ def build_sara_attn2_kv_sparse_masks(
         total_target += total
         p.requires_grad_(cnt > 0)
         rows.append((name, cnt, total, cnt / max(total, 1)))
-        p._sara_sparse_mask = mask.to(device=p.device, dtype=p.dtype)
+        p._sara_sparse_mask = mask.to(device=p.device, dtype=torch.bool)
 
     frac = selected / max(total_target, 1)
     print(
