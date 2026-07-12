@@ -4,6 +4,21 @@
 `train.py`, `pure_ella/{connector,sara,config,dataset,diagnostics}.py` and
 `config_long_256.json`.*
 
+## Implementation update (2026-07-12)
+
+The supported P1 baseline is now **256 Gemma input tokens -> 77 SD1.5
+conditioning tokens**. `ella_tsc` is a fixed-query, timestep-aware resampler
+with a learned mixture of upper Gemma layers; it keeps the pretrained U-Net
+cross-attention contract intact. Direct 77 -> 256 token concatenation is not
+supported because even zero-valued extra K/V tokens perturb attention softmax
+normalization. A future extension must use a separately gated U-Net attention
+branch, not concatenation.
+
+Implemented Phase 0 corrections: SaRA uses `max_samples_sara`; checkpoint
+resolution checks all local fallbacks before accepting a Hugging Face ID;
+unknown JSON keys fail fast; run mode no longer overwrites explicit budgets;
+full-frame aspect-ratio buckets replace center cropping; sparse masks are bool.
+
 ## Vision
 
 Four capability pillars, in dependency order:
