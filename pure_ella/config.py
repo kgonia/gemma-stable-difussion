@@ -67,7 +67,7 @@ class TrainConfig:
     gemma_id: str = "google/gemma-3-270m-it"
     gemma_layer_index: int = -1
     gemma_layer_mix_count: int = 4
-    max_gemma_len: int = 320
+    max_gemma_len: int = 336
     fail_on_prompt_truncation: bool = True
     clip_id: str = "openai/clip-vit-large-patch14"
     sd_checkpoint: str = ""  # path to .safetensors SD checkpoint, empty = use runwayml/stable-diffusion-v1-5
@@ -112,10 +112,13 @@ class TrainConfig:
     train_batch_size: int = 4
     shuffle_buffer: int = 10000
     grad_clip_norm: float = 0.5
-    stream_repo: str = "jackyhate/text-to-image-2M"
+    data_sources: List[str] = field(default_factory=lambda: [
+        "jackyhate/text-to-image-2M",
+    ])
+    max_image_dimension: int = 1024
     aspect_ratio_buckets: List[List[int]] = field(default_factory=lambda: [
-        [512, 512], [576, 448], [640, 384],
-        [448, 576], [384, 640],
+        [1024, 1024], [1024, 896], [1024, 768], [1024, 640], [1024, 512],
+        [896, 1024], [768, 1024], [640, 1024], [512, 1024],
     ])
     drop_last_bucket_batches: bool = True
     caption_mix_short: float = 0.25
@@ -243,10 +246,21 @@ class TrainConfig:
             raise ValueError("caption mix weights must sum to 1.0")
         if not self.aspect_ratio_buckets:
             raise ValueError("aspect_ratio_buckets must not be empty")
+        if not self.data_sources or any(
+                not isinstance(source, str) or not source.strip()
+                for source in self.data_sources):
+            raise ValueError("data_sources must contain at least one location")
+        if self.max_image_dimension <= 0:
+            raise ValueError("max_image_dimension must be positive")
         for bucket in self.aspect_ratio_buckets:
             if len(bucket) != 2 or any(int(v) <= 0 or int(v) % 8 for v in bucket):
                 raise ValueError(
                     f"Invalid aspect-ratio bucket {bucket}; dimensions must be positive multiples of 8"
+                )
+            if max(map(int, bucket)) > self.max_image_dimension:
+                raise ValueError(
+                    f"Invalid aspect-ratio bucket {bucket}; dimensions exceed "
+                    f"max_image_dimension={self.max_image_dimension}"
                 )
 
         # Resolve SD checkpoint
@@ -268,7 +282,10 @@ class TrainConfig:
         print(f"SaRA: {self.run_sara_phase}")
         print(f"Gemma: {self.gemma_id} layer={self.gemma_layer_index}")
         print(f"SD checkpoint: {self.sd_checkpoint}")
-        print(f"Dataset: {self.stream_repo} batch={self.train_batch_size}")
+        print(
+            f"Datasets: {self.data_sources} batch={self.train_batch_size} "
+            f"max_image_dimension={self.max_image_dimension}"
+        )
         print(f"Output: {self.output_dir}")
 
     @classmethod

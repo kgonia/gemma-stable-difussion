@@ -67,6 +67,7 @@ from pure_ella.diagnostics import (
     _rel_diff,
     _to_float_maybe,
     suffix_counterfactual_sensitivity,
+    validate_suffix_counterfactual_token_boundaries,
     generate_case_image,
     save_complex_case_grid,
     save_suffix_counterfactual_grids,
@@ -98,6 +99,11 @@ class TrainingState:
     # Dataset
     overfit_eval_batch: dict = None
     ref_quality_cache: dict = None
+    caption_availability_logged: bool = False
+    gemma_prompt_max_observed: int = -1
+    gemma_truncated_prompt_count: int = 0
+    suffix_token_boundary_signature: tuple = None
+    suffix_token_boundaries: dict = None
 
     # Wandb
     wandb: Any = None
@@ -168,14 +174,15 @@ def apply_conditioning_dropout(captions, probability: float):
             for caption, drop in zip(captions, dropped)]
 
 
-def select_training_captions(batch: dict, cfg: TrainConfig):
-    """Sample paired caption lengths, falling back to the long caption."""
+def select_training_captions(batch: dict, state: TrainingState):
+    """Sample caption lengths with nearest-length fallback."""
+    cfg = state.cfg
     long_captions = _as_prompt_list(batch["caption"])
     medium_captions = _as_prompt_list(
         batch.get("caption_medium", [""] * len(long_captions)))
     short_captions = _as_prompt_list(
         batch.get("caption_short", [""] * len(long_captions)))
-    if not hasattr(cfg, "_caption_availability_logged"):
+    if not state.caption_availability_logged:
         short_count = sum(bool(caption) for caption in short_captions)
         medium_count = sum(bool(caption) for caption in medium_captions)
         print(
@@ -185,19 +192,20 @@ def select_training_captions(batch: dict, cfg: TrainConfig):
         )
         if short_count == 0 and medium_count == 0:
             print("WARNING: caption curriculum unavailable; using long captions only")
-        cfg._caption_availability_logged = True
+        state.caption_availability_logged = True
     choices = torch.rand(len(long_captions))
     short_cutoff = cfg.caption_mix_short
     medium_cutoff = short_cutoff + cfg.caption_mix_medium
     selected = []
-    for value, short, medium, long in zip(
+    for value, short_caption, medium_caption, long_caption in zip(
             choices, short_captions, medium_captions, long_captions):
-        if value < short_cutoff and short:
-            selected.append(short)
-        elif value < medium_cutoff and medium:
-            selected.append(medium)
+        if value < short_cutoff:
+            candidates = (short_caption, medium_caption, long_caption)
+        elif value < medium_cutoff:
+            candidates = (medium_caption, short_caption, long_caption)
         else:
-            selected.append(long)
+            candidates = (long_caption, medium_caption, short_caption)
+        selected.append(next(caption for caption in candidates if caption))
     return selected
 
 
@@ -231,6 +239,10 @@ def load_gemma(state: TrainingState):
     print(f"Loading Gemma: {cfg.gemma_id}")
     state.gemma_tokenizer = AutoTokenizer.from_pretrained(
         cfg.gemma_id, token=os.environ.get("HF_TOKEN"))
+    if (cfg.max_gemma_len > cfg.clip_anchor_tokens
+            and (cfg.run_long_context_diagnostics
+                 or cfg.run_suffix_counterfactual_grids)):
+        validate_suffix_counterfactual_token_boundaries(state)
     state.gemma_model = AutoModel.from_pretrained(
         cfg.gemma_id, torch_dtype=torch.bfloat16, device_map="auto",
         token=os.environ.get("HF_TOKEN"),
@@ -356,27 +368,42 @@ def make_encode_gemma(state: TrainingState):
     def encode_gemma(prompts, max_length=None):
         max_length = max_length or state.cfg.max_gemma_len
         prompts = _as_prompt_list(prompts)
-        untruncated = state.gemma_tokenizer(
+        encoded = state.gemma_tokenizer(
             prompts, padding=False, truncation=False)
-        lengths = [len(ids) for ids in untruncated["input_ids"]]
+        lengths = [len(ids) for ids in encoded["input_ids"]]
         longest = max(lengths, default=0)
-        previous_max = getattr(state, "_gemma_prompt_max_observed", -1)
-        if longest > previous_max:
+        if longest > state.gemma_prompt_max_observed:
             print(
                 f"Gemma prompt tokens: batch_min={min(lengths, default=0)} "
                 f"batch_max={longest} observed_max={longest} limit={max_length}"
             )
-            state._gemma_prompt_max_observed = longest
-        if longest > max_length and state.cfg.fail_on_prompt_truncation:
+            state.gemma_prompt_max_observed = longest
+        overflow_count = sum(length > max_length for length in lengths)
+        if overflow_count and state.cfg.fail_on_prompt_truncation:
             index = lengths.index(longest)
             raise ValueError(
                 f"Gemma prompt has {longest} tokens but max_gemma_len={max_length}; "
                 f"refusing silent truncation: {prompts[index][:160]!r}"
             )
-        toks = state.gemma_tokenizer(
-            prompts,
-            padding="max_length", truncation=True,
-            max_length=max_length, return_tensors="pt",
+        if overflow_count:
+            state.gemma_truncated_prompt_count += overflow_count
+            if state.gemma_truncated_prompt_count == overflow_count:
+                print(
+                    "WARNING: permissive Gemma prompt truncation is enabled; "
+                    f"truncating {overflow_count} prompt(s) to {max_length} tokens"
+                )
+            truncate = (
+                (lambda sequence: sequence[-max_length:])
+                if state.gemma_tokenizer.truncation_side == "left"
+                else (lambda sequence: sequence[:max_length])
+            )
+            encoded = {
+                name: [truncate(sequence) for sequence in sequences]
+                for name, sequences in encoded.items()
+            }
+        toks = state.gemma_tokenizer.pad(
+            encoded, padding="max_length", max_length=max_length,
+            return_tensors="pt",
         ).to(state.gemma_model.device)
         out = state.gemma_model(**toks, output_hidden_states=True,
                                 use_cache=False)
@@ -477,13 +504,14 @@ def run_clip_pretrain(state: TrainingState):
 
     for epoch in range(cfg.pretrain_epochs):
         dl = make_streaming_dataloader(
-            cfg.stream_repo, phase=10, epoch=epoch,
+            cfg.data_sources, phase=10, epoch=epoch,
             max_samples=cfg.max_samples_pretrain,
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
             buckets=cfg.aspect_ratio_buckets,
-            drop_last=cfg.drop_last_bucket_batches)
+            drop_last=cfg.drop_last_bucket_batches,
+            max_image_dimension=cfg.max_image_dimension)
         progress = tqdm(dl, desc=f"CLIP-pretrain {epoch+1}/{cfg.pretrain_epochs}")
         for batch in progress:
             long_captions = _as_prompt_list(batch["caption"])
@@ -651,17 +679,18 @@ def run_ella_training(state: TrainingState):
 
     for epoch in range(cfg.ella_epochs):
         dl = make_streaming_dataloader(
-            cfg.stream_repo, phase=20, epoch=epoch,
+            cfg.data_sources, phase=20, epoch=epoch,
             max_samples=cfg.max_samples_ella,
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
             buckets=cfg.aspect_ratio_buckets,
-            drop_last=cfg.drop_last_bucket_batches)
+            drop_last=cfg.drop_last_bucket_batches,
+            max_image_dimension=cfg.max_image_dimension)
         progress = tqdm(dl, desc=f"ELLA {epoch+1}/{cfg.ella_epochs}")
         for batch in progress:
             captions = apply_conditioning_dropout(
-                select_training_captions(batch, cfg),
+                select_training_captions(batch, state),
                 cfg.conditioning_dropout_prob)
             img = batch["image"].to(device=state.device,
                                      dtype=state.unet_dtype)
@@ -906,17 +935,18 @@ def run_sara_training(state: TrainingState):
 
     for epoch in range(cfg.sara_epochs):
         dl = make_streaming_dataloader(
-            cfg.stream_repo, phase=30, epoch=epoch,
+            cfg.data_sources, phase=30, epoch=epoch,
             max_samples=cfg.max_samples_sara,
             batch_size=cfg.train_batch_size,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
             buckets=cfg.aspect_ratio_buckets,
-            drop_last=cfg.drop_last_bucket_batches)
+            drop_last=cfg.drop_last_bucket_batches,
+            max_image_dimension=cfg.max_image_dimension)
         progress = tqdm(dl, desc=f"ELLA+SaRA {epoch+1}/{cfg.sara_epochs}")
         for batch in progress:
             captions = apply_conditioning_dropout(
-                select_training_captions(batch, cfg),
+                select_training_captions(batch, state),
                 cfg.conditioning_dropout_prob)
             img = batch["image"].to(device=state.device, dtype=state.unet_dtype)
             image_mask = batch.get("image_mask")
@@ -1484,13 +1514,16 @@ def main():
     build_ella_connector(state)
 
     if cfg.run_mode == "overfit_train":
+        overfit_batch_size = min(4, cfg.train_batch_size)
         dl = make_streaming_dataloader(
-            cfg.stream_repo, phase=1, epoch=0,
-            max_samples=max(cfg.max_samples_ella, 4), batch_size=4,
+            cfg.data_sources, phase=1, epoch=0,
+            max_samples=max(cfg.max_samples_ella, overfit_batch_size),
+            batch_size=overfit_batch_size,
             shuffle=cfg.shuffle_streaming,
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
             buckets=cfg.aspect_ratio_buckets,
-            drop_last=False)
+            drop_last=False,
+            max_image_dimension=cfg.max_image_dimension)
         batch = next(iter(dl))
         state.overfit_eval_batch = {
             "image": batch["image"],

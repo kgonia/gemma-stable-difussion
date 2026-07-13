@@ -545,6 +545,19 @@ def validate_suffix_counterfactual_token_boundaries(state, cases=None) -> dict:
     cfg = state.cfg
     cases = cfg.suffix_counterfactual_cases if cases is None else cases
     prefix = cfg.suffix_counterfactual_prefix
+    signature = (
+        prefix,
+        cfg.clip_anchor_tokens,
+        cfg.max_gemma_len,
+        tuple(
+            (case["name"], case["prompt_suffix_a"], case["prompt_suffix_b"])
+            for case in cases
+        ),
+    )
+    if (getattr(state, "suffix_token_boundary_signature", None) == signature
+            and getattr(state, "suffix_token_boundaries", None) is not None):
+        return state.suffix_token_boundaries
+
     prefix_tokens = _gemma_token_count(state, prefix + " ")
     if prefix_tokens <= cfg.clip_anchor_tokens:
         raise ValueError(
@@ -573,6 +586,8 @@ def validate_suffix_counterfactual_token_boundaries(state, cases=None) -> dict:
             f"[suffix_tokens] {case['name']}: prefix={prefix_tokens} "
             f"full_a={tokens_a} full_b={tokens_b} limit={cfg.max_gemma_len}"
         )
+    state.suffix_token_boundary_signature = signature
+    state.suffix_token_boundaries = per_case
     return per_case
 
 

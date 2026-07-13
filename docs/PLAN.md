@@ -7,7 +7,7 @@
 ## Implementation update (2026-07-12)
 
 The supported P1 baseline is now **approximately 256-token Gemma captions
-(320-token safety window) -> 77 SD1.5 conditioning tokens**. `ella_tsc` is a
+(336-token safety window) -> 77 SD1.5 conditioning tokens**. `ella_tsc` is a
 fixed-query, timestep-aware resampler
 with a learned mixture of upper Gemma layers; it keeps the pretrained U-Net
 cross-attention contract intact. Direct 77 -> 256 token concatenation is not
@@ -22,14 +22,15 @@ full-frame aspect-ratio buckets replace center cropping; sparse masks remain
 bool through gradient hooks. Input-side suffix diagnostics now verify that the
 counterfactual suffix begins after token 77 and is not truncated. Phase 0 uses
 the exact CLIP-visible decoded prefix; Phase 1 samples paired short/medium/long
-captions at 25/25/50 when the dataset supplies them.
+captions at 25/25/50 when the dataset supplies them. Gemma encoding performs one
+tokenizer pass per batch, and suffix boundaries fail fast once at startup.
 
 ## Vision
 
 Four capability pillars, in dependency order:
 
 1. **P1 — Long Gemma prompts** via the ELLA timestep-aware connector
-   (up to 320 input tokens -> 77 fixed SD1.5 conditioning tokens).
+   (up to 336 input tokens -> 77 fixed SD1.5 conditioning tokens).
 2. **P2 — Train only undertrained weights** (SaRA sparse masks on `attn2` K/V) so new
    capability lands without destroying pretrained knowledge.
 3. **P3 — Second conditioning signal**: camera intrinsics / capture metadata alongside
@@ -61,8 +62,9 @@ guarantee and the ablation story: each pillar is exactly removable.
 - Diagnostics cover input-suffix sensitivity, short-prompt teacher-student delta
   alignment, FID/KID, and reload proofs. Output-token ablation is intentionally
   obsolete because the connector always emits exactly 77 tokens.
-- Dataset: streamed full-frame aspect buckets with masked letterbox padding and
-  optional `caption_short`/`caption_medium`/`caption_long` variants.
+- Dataset: multiple local Parquet/Hugging Face locations, streamed round-robin
+  into 1024-edge full-frame buckets with masked letterbox padding and optional
+  `caption_short`/`caption_medium`/`caption_long` variants.
 - `config_long_256.json` = connector-only long-input baseline, batch 8,
   StyleJourney v10; SaRA is deferred to a separate stage.
 
@@ -110,12 +112,12 @@ This is the baseline every later pillar is measured against.
   CLIP-geometry pretrain. Keep Phase 1 CLIP teacher/delta losses disabled: CLIP cannot
   observe suffix tokens beyond its 77-token window and would reward suffix blindness.
 - Use paired caption variants when available: 25% short, 25% medium, 50% long. Target
-  approximately 256 Gemma tokens while retaining the configured 320-token safety
+  approximately 256 Gemma tokens while retaining the configured 336-token safety
   window; fail instead of silently truncating longer samples.
 - **Exit criteria:** suffix A/B counterfactual sensitivity is non-trivial and sustained;
   compositional long-prompt grids visibly bind suffix attributes; short-prompt FID/KID
   stays within tolerance of the CLIP baseline; connector reload proof passes.
-- **Deliverable:** a Gemma-320-input/SD1.5-77-output connector checkpoint, frozen as
+- **Deliverable:** a Gemma-336-input/SD1.5-77-output connector checkpoint, frozen as
   the reference checkpoint ("B0") for subsequent SaRA and metadata ablations.
 
 ## P2 — Undertrained-weight training (SaRA), widened deliberately

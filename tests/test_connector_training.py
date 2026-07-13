@@ -8,10 +8,19 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 from PIL import Image
+from transformers import BatchEncoding
 
+from train import make_encode_gemma, select_training_captions
 from pure_ella.config import TrainConfig, resolve_sd_checkpoint
 from pure_ella.connector import build_connector
-from pure_ella.dataset import BucketBatchDataset, resize_full_frame
+from pure_ella.dataset import (
+    BucketBatchDataset,
+    RoundRobinSources,
+    StreamingSDDataset,
+    _local_parquet_files,
+    resize_full_frame,
+    resize_long_edge,
+)
 from pure_ella.diagnostics import (
     suffix_counterfactual_sensitivity,
     validate_suffix_counterfactual_token_boundaries,
@@ -53,6 +62,63 @@ class ConnectorTrainingTests(unittest.TestCase):
         self.assertEqual(content_mask.getbbox(), (0, 85, 640, 298))
         self.assertEqual(resized.getpixel((320, 192)), (255, 0, 0))
         self.assertEqual(resized.getpixel((320, 0)), (127, 127, 127))
+
+    def test_long_edge_resize_preserves_aspect_ratio(self):
+        image = Image.new("RGB", (4000, 2000), color=(1, 2, 3))
+
+        resized = resize_long_edge(image, 1024)
+
+        self.assertEqual(resized.size, (1024, 512))
+
+    def test_unsplash_schema_loads_local_image_without_cropping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (400, 200), color=(10, 20, 30)).save(image_path)
+            source = [{
+                "local_image_path": str(image_path),
+                "training_caption": "a detailed landscape caption",
+                "caption_short": None,
+            }]
+
+            sample = next(iter(StreamingSDDataset(
+                source, max_samples=1, buckets=[(64, 32)],
+                max_image_dimension=1024)))
+
+        self.assertEqual(sample["caption"], "a detailed landscape caption")
+        self.assertEqual(sample["caption_short"], "")
+        self.assertEqual(tuple(sample["image"].shape), (3, 32, 64))
+        self.assertTrue(sample["image_mask"].bool().all())
+
+    def test_multiple_sources_are_consumed_without_schema_alignment(self):
+        sources = [
+            (iter([{"id": "a1"}, {"id": "a2"}]), "/a"),
+            (iter([{"other": "b1"}]), "/b"),
+        ]
+
+        samples = list(RoundRobinSources(sources, seed=1))
+
+        self.assertEqual(len(samples), 3)
+        self.assertEqual({sample["_source_root"] for sample in samples}, {"/a", "/b"})
+        self.assertEqual({sample.get("id") for sample in samples if "id" in sample},
+                         {"a1", "a2"})
+
+    def test_local_data_sources_accept_parquet_files_and_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.parquet"
+            second = root / "nested" / "second.parquet"
+            second.parent.mkdir()
+            first.touch()
+            second.touch()
+
+            self.assertEqual(_local_parquet_files(str(first)), [str(first.resolve())])
+            windows_style = str(first).replace("/", "\\")
+            self.assertEqual(
+                _local_parquet_files(windows_style), [str(first.resolve())])
+            self.assertEqual(
+                _local_parquet_files(str(root)),
+                [str(first.resolve()), str(second.resolve())],
+            )
 
     def test_bucket_batcher_never_mixes_image_shapes(self):
         samples = [
@@ -102,8 +168,11 @@ class ConnectorTrainingTests(unittest.TestCase):
 
     def test_suffix_diagnostic_proves_late_non_truncated_input(self):
         class WhitespaceTokenizer:
-            @staticmethod
-            def encode(text, **_kwargs):
+            def __init__(self):
+                self.calls = 0
+
+            def encode(self, text, **_kwargs):
+                self.calls += 1
                 return [0] + text.split()
 
         case = {
@@ -117,14 +186,115 @@ class ConnectorTrainingTests(unittest.TestCase):
             clip_anchor_tokens=77,
             max_gemma_len=100,
         )
-        state = SimpleNamespace(cfg=cfg, gemma_tokenizer=WhitespaceTokenizer())
+        tokenizer = WhitespaceTokenizer()
+        state = SimpleNamespace(cfg=cfg, gemma_tokenizer=tokenizer)
 
         result = validate_suffix_counterfactual_token_boundaries(state)
         self.assertGreater(result["late_object"]["prefix_tokens"], 77)
+        self.assertEqual(tokenizer.calls, 3)
+        self.assertIs(
+            validate_suffix_counterfactual_token_boundaries(state), result)
+        self.assertEqual(tokenizer.calls, 3)
 
         cfg.max_gemma_len = 82
         with self.assertRaisesRegex(ValueError, "max_gemma_len"):
             validate_suffix_counterfactual_token_boundaries(state)
+
+    def test_gemma_encoding_tokenizes_once_and_reuses_ids_for_padding(self):
+        class Tokenizer:
+            truncation_side = "right"
+
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, prompts, **kwargs):
+                self.calls += 1
+                self.assert_untruncated(kwargs)
+                input_ids = [list(range(1, len(text.split()) + 2))
+                             for text in prompts]
+                return {
+                    "input_ids": input_ids,
+                    "attention_mask": [[1] * len(ids) for ids in input_ids],
+                }
+
+            @staticmethod
+            def assert_untruncated(kwargs):
+                if kwargs != {"padding": False, "truncation": False}:
+                    raise AssertionError(kwargs)
+
+            @staticmethod
+            def pad(encoded, padding, max_length, return_tensors):
+                if padding != "max_length" or return_tensors != "pt":
+                    raise AssertionError((padding, return_tensors))
+                padded = {}
+                for name, sequences in encoded.items():
+                    pad_value = 0
+                    padded[name] = torch.tensor([
+                        sequence + [pad_value] * (max_length - len(sequence))
+                        for sequence in sequences
+                    ])
+                return BatchEncoding(padded)
+
+        class Model:
+            device = torch.device("cpu")
+
+            def __call__(self, input_ids, **_kwargs):
+                hidden = input_ids.float().unsqueeze(-1).expand(-1, -1, 3)
+                return SimpleNamespace(hidden_states=(hidden, hidden + 1))
+
+        cfg = TrainConfig(
+            context_tokens=4,
+            clip_anchor_tokens=4,
+            max_gemma_len=6,
+            gemma_layer_index=-1,
+            gemma_layer_mix_count=2,
+        )
+        tokenizer = Tokenizer()
+        state = SimpleNamespace(
+            cfg=cfg,
+            gemma_tokenizer=tokenizer,
+            gemma_model=Model(),
+            device=torch.device("cpu"),
+            gemma_prompt_max_observed=-1,
+            gemma_truncated_prompt_count=0,
+        )
+
+        hidden, mask = make_encode_gemma(state)(["one two", "three"])
+
+        self.assertEqual(tokenizer.calls, 1)
+        self.assertEqual(hidden.shape, (2, 2, 6, 3))
+        self.assertEqual(mask.shape, (2, 6))
+
+        long_prompt = "one two three four five six seven"
+        with self.assertRaisesRegex(ValueError, "refusing silent truncation"):
+            make_encode_gemma(state)([long_prompt])
+        self.assertEqual(tokenizer.calls, 2)
+        self.assertEqual(state.gemma_truncated_prompt_count, 0)
+
+        cfg.fail_on_prompt_truncation = False
+        hidden, mask = make_encode_gemma(state)([long_prompt])
+        self.assertEqual(tokenizer.calls, 3)
+        self.assertEqual(hidden.shape, (1, 2, 6, 3))
+        self.assertEqual(mask.sum().item(), 6)
+        self.assertEqual(state.gemma_truncated_prompt_count, 1)
+
+    def test_caption_curriculum_uses_nearest_available_fallback(self):
+        cfg = TrainConfig(
+            caption_mix_short=0.25,
+            caption_mix_medium=0.25,
+            caption_mix_long=0.5,
+        )
+        state = SimpleNamespace(cfg=cfg, caption_availability_logged=True)
+        batch = {
+            "caption": ["long one", "long two"],
+            "caption_medium": ["medium one", ""],
+            "caption_short": ["", "short two"],
+        }
+
+        with patch("train.torch.rand", return_value=torch.tensor([0.1, 0.3])):
+            selected = select_training_captions(batch, state)
+
+        self.assertEqual(selected, ["medium one", "short two"])
 
     def test_suffix_diagnostic_runs_for_long_input_with_fixed_output(self):
         class WhitespaceTokenizer:

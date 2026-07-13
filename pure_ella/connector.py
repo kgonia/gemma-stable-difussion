@@ -13,6 +13,37 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _make_layer_mix_logits(layer_count: int) -> nn.Parameter:
+    layer_count = int(layer_count)
+    if layer_count < 1:
+        raise ValueError("gemma_layer_mix_count must be positive")
+    logits = torch.full((layer_count,), -4.0)
+    logits[-1] = 0.0
+    return nn.Parameter(logits)
+
+
+def _mix_gemma_layers(gemma_h, layer_mix_logits, connector_name: str):
+    layer_count = layer_mix_logits.shape[0]
+    if gemma_h.ndim == 3:
+        if layer_count != 1:
+            raise ValueError(
+                f"{connector_name} expects stacked Gemma layers with shape "
+                "[B, K, L, D]"
+            )
+        return gemma_h
+    if gemma_h.ndim != 4:
+        raise ValueError(
+            "Gemma states must have shape [B, L, D] or [B, K, L, D]")
+    if gemma_h.shape[1] != layer_count:
+        raise ValueError(
+            f"{connector_name} expected {layer_count} Gemma layers, "
+            f"got {gemma_h.shape[1]}"
+        )
+    weights = torch.softmax(layer_mix_logits, dim=0).to(
+        device=gemma_h.device, dtype=gemma_h.dtype)
+    return (gemma_h * weights[None, :, None, None]).sum(dim=1)
+
+
 class ELLAFeedForward(nn.Module):
     """Simple feed-forward block with LayerNorm, expansion, GELU, dropout, projection."""
     def __init__(self, width: int, mult: int = 4, dropout: float = 0.0):
@@ -137,11 +168,8 @@ class PureELLALongConnector(nn.Module):
         self.context_tokens = int(context_tokens)
         self.anchor_tokens = int(anchor_tokens)
         self.gemma_layer_mix_count = int(gemma_layer_mix_count)
-        if self.gemma_layer_mix_count < 1:
-            raise ValueError("gemma_layer_mix_count must be positive")
-        mix_init = torch.full((self.gemma_layer_mix_count,), -4.0)
-        mix_init[-1] = 0.0
-        self.layer_mix_logits = nn.Parameter(mix_init)
+        self.layer_mix_logits = _make_layer_mix_logits(
+            self.gemma_layer_mix_count)
         self.input_proj = nn.Linear(gemma_dim, width)
         self.input_norm = nn.LayerNorm(width)
         self.query_tokens = nn.Parameter(torch.randn(1, context_tokens, width) * 0.02)
@@ -172,21 +200,8 @@ class PureELLALongConnector(nn.Module):
         return emb
 
     def _mix_gemma_layers(self, gemma_h):
-        if gemma_h.ndim == 3:
-            if self.gemma_layer_mix_count != 1:
-                raise ValueError(
-                    "Connector expects stacked Gemma layers with shape [B, K, L, D]"
-                )
-            return gemma_h
-        if gemma_h.ndim != 4:
-            raise ValueError("Gemma states must have shape [B, L, D] or [B, K, L, D]")
-        if gemma_h.shape[1] != self.gemma_layer_mix_count:
-            raise ValueError(
-                f"Expected {self.gemma_layer_mix_count} Gemma layers, got {gemma_h.shape[1]}"
-            )
-        weights = torch.softmax(self.layer_mix_logits, dim=0).to(
-            device=gemma_h.device, dtype=gemma_h.dtype)
-        return (gemma_h * weights[None, :, None, None]).sum(dim=1)
+        return _mix_gemma_layers(
+            gemma_h, self.layer_mix_logits, type(self).__name__)
 
     def forward(self, gemma_h, timesteps, gemma_mask=None, context_tokens=None):
         context_tokens = int(context_tokens or self.context_tokens)
@@ -281,11 +296,8 @@ class TRMYZConnector(nn.Module):
         self.context_tokens = int(context_tokens)
         self.anchor_tokens = int(anchor_tokens)
         self.gemma_layer_mix_count = int(gemma_layer_mix_count)
-        if self.gemma_layer_mix_count < 1:
-            raise ValueError("gemma_layer_mix_count must be positive")
-        mix_init = torch.full((self.gemma_layer_mix_count,), -4.0)
-        mix_init[-1] = 0.0
-        self.layer_mix_logits = nn.Parameter(mix_init)
+        self.layer_mix_logits = _make_layer_mix_logits(
+            self.gemma_layer_mix_count)
         self.trm_outer_steps = int(trm_outer_steps)
         self.trm_inner_steps = int(trm_inner_steps)
         self.trm_scratch_tokens = int(trm_scratch_tokens)
@@ -338,19 +350,8 @@ class TRMYZConnector(nn.Module):
         return y
 
     def _mix_gemma_layers(self, gemma_h):
-        if gemma_h.ndim == 3:
-            if self.gemma_layer_mix_count != 1:
-                raise ValueError(
-                    "TRM expects stacked Gemma layers with shape [B, K, L, D]"
-                )
-            return gemma_h
-        if gemma_h.ndim != 4 or gemma_h.shape[1] != self.gemma_layer_mix_count:
-            raise ValueError(
-                f"Expected {self.gemma_layer_mix_count} stacked Gemma layers"
-            )
-        weights = torch.softmax(self.layer_mix_logits, dim=0).to(
-            device=gemma_h.device, dtype=gemma_h.dtype)
-        return (gemma_h * weights[None, :, None, None]).sum(dim=1)
+        return _mix_gemma_layers(
+            gemma_h, self.layer_mix_logits, type(self).__name__)
 
     def forward(self, gemma_h, timesteps, gemma_mask=None, context_tokens=None):
         context_tokens = int(context_tokens or self.context_tokens)

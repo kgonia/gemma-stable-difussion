@@ -1,13 +1,13 @@
-"""
-Streaming dataset for SD training via HuggingFace datasets.
-
-Uses streaming mode to avoid downloading the entire dataset to disk.
-"""
+"""Streaming, full-frame image-caption data loading for SD training."""
 from __future__ import annotations
+import glob
 import io
 import json
 import math
-from typing import List, Optional
+import os
+import random
+from pathlib import Path
+from typing import Sequence
 
 from PIL import Image, ImageOps
 import torch
@@ -16,14 +16,31 @@ from torchvision import transforms
 
 
 BUCKETS = (
-    (512, 512), (576, 448), (640, 384),
-    (448, 576), (384, 640),
+    (1024, 1024), (1024, 896), (1024, 768), (1024, 640), (1024, 512),
+    (896, 1024), (768, 1024), (640, 1024), (512, 1024),
 )
 
 
 def _get_bucket(w: int, h: int, buckets=BUCKETS):
     target = w / h
     return min(buckets, key=lambda x: abs(math.log((x[0] / x[1]) / target)))
+
+
+def resize_long_edge(img: Image.Image, max_dimension: int = 1024):
+    """Downscale without cropping so neither dimension exceeds the limit."""
+    max_dimension = int(max_dimension)
+    if max_dimension <= 0:
+        raise ValueError("max_dimension must be positive")
+    width, height = img.size
+    longest = max(width, height)
+    if longest <= max_dimension:
+        return img
+    scale = max_dimension / longest
+    size = (
+        max(1, round(width * scale)),
+        max(1, round(height * scale)),
+    )
+    return img.resize(size, Image.Resampling.LANCZOS)
 
 
 def resize_full_frame(img: Image.Image, bucket):
@@ -39,15 +56,73 @@ def resize_full_frame(img: Image.Image, bucket):
     return canvas, mask
 
 
-class StreamingSDDataset(IterableDataset):
-    """Streaming SD dataset from a HuggingFace dataset repository.
+def _local_parquet_files(source: str) -> list[str]:
+    """Resolve a local Parquet file, directory, or glob; return [] for HF IDs."""
+    expanded = os.path.expandvars(os.path.expanduser(source)).replace("\\", "/")
+    if len(expanded) >= 3 and expanded[1:3] == ":/":
+        expanded = f"/mnt/{expanded[0].lower()}/{expanded[3:]}"
+    elif expanded.startswith("mnt/"):
+        expanded = f"/{expanded}"
+    path = Path(expanded)
+    if path.is_file():
+        if path.suffix.lower() != ".parquet":
+            raise ValueError(f"Unsupported local data file: {source}")
+        return [str(path.resolve())]
+    if path.is_dir():
+        files = sorted(str(item.resolve()) for item in path.rglob("*.parquet"))
+        if not files:
+            raise FileNotFoundError(f"No Parquet files found under {source}")
+        return files
+    if glob.has_magic(expanded):
+        files = sorted(
+            str(Path(item).resolve()) for item in glob.glob(expanded, recursive=True)
+            if Path(item).is_file() and Path(item).suffix.lower() == ".parquet"
+        )
+        if not files:
+            raise FileNotFoundError(f"No Parquet files match {source}")
+        return files
+    if (expanded.startswith(("/", "./", "../"))
+            or expanded.lower().endswith(".parquet")):
+        raise FileNotFoundError(f"Local data source not found: {source}")
+    return []
 
-    Yields dicts with ``image`` (torch float32 in [-1, 1]) and ``caption`` (str).
-    """
-    def __init__(self, ds_iter, max_samples: int = 2000, buckets=BUCKETS):
+
+class RoundRobinSources:
+    """Yield each configured source once without requiring matching schemas."""
+
+    def __init__(self, sources, seed: int):
+        self.sources = list(sources)
+        self.seed = int(seed)
+
+    def __iter__(self):
+        sources = list(self.sources)
+        random.Random(self.seed).shuffle(sources)
+        active = [
+            [iter(dataset), source_root]
+            for dataset, source_root in sources
+        ]
+        while active:
+            remaining = []
+            for iterator, source_root in active:
+                try:
+                    sample = dict(next(iterator))
+                except StopIteration:
+                    continue
+                sample.setdefault("_source_root", source_root)
+                yield sample
+                remaining.append([iterator, source_root])
+            active = remaining
+
+
+class StreamingSDDataset(IterableDataset):
+    """Normalize heterogeneous image-caption samples into bucketed tensors."""
+
+    def __init__(self, ds_iter, max_samples: int = 2000, buckets=BUCKETS,
+                 max_image_dimension: int = 1024):
         self.ds_iter = ds_iter
         self.max_samples = int(max_samples)
         self.buckets = tuple((int(w), int(h)) for w, h in buckets)
+        self.max_image_dimension = int(max_image_dimension)
 
     def __iter__(self):
         def _get_caption_variants(sample: dict) -> dict:
@@ -66,12 +141,18 @@ class StreamingSDDataset(IterableDataset):
                 for source in (sample, meta):
                     for key in keys:
                         candidate = source.get(key)
-                        if candidate:
-                            return str(candidate)
+                        if candidate is None:
+                            continue
+                        if isinstance(candidate, float) and math.isnan(candidate):
+                            continue
+                        text = str(candidate).strip()
+                        if text and text.lower() not in {"nan", "none", "null"}:
+                            return text
                 return ""
 
             long_caption = value(
-                "caption_long", "long_caption", "prompt", "caption", "text")
+                "training_caption", "caption_detailed", "caption_long",
+                "long_caption", "prompt", "caption", "text")
             medium_caption = value("caption_medium", "medium_caption")
             short_caption = value(
                 "caption_short", "short_caption", "original_caption")
@@ -88,7 +169,27 @@ class StreamingSDDataset(IterableDataset):
                 img = sample.get(key)
                 if img is not None:
                     return img
+            for key in ["local_image_path", "image_path", "path", "filepath"]:
+                path = sample.get(key)
+                if path:
+                    path = Path(os.path.expanduser(str(path)))
+                    if not path.is_absolute():
+                        path = Path(sample.get("_source_root", ".")) / path
+                    return str(path)
             return None
+
+        def _open_image(image_value):
+            if isinstance(image_value, Image.Image):
+                return image_value
+            if isinstance(image_value, dict):
+                if image_value.get("bytes") is not None:
+                    return Image.open(io.BytesIO(image_value["bytes"]))
+                image_value = image_value.get("path")
+            if isinstance(image_value, (bytes, bytearray, memoryview)):
+                return Image.open(io.BytesIO(bytes(image_value)))
+            if isinstance(image_value, (str, os.PathLike)):
+                return Image.open(image_value)
+            raise TypeError(f"Unsupported image value: {type(image_value).__name__}")
 
         count = 0
         for sample in self.ds_iter:
@@ -97,12 +198,24 @@ class StreamingSDDataset(IterableDataset):
             captions = _get_caption_variants(sample)
             if not captions["caption"]:
                 continue
-            img = _get_image(sample)
-            if img is None:
+            image_value = _get_image(sample)
+            if image_value is None:
                 continue
-            if isinstance(img, bytes):
-                img = Image.open(io.BytesIO(img))
-            img = img.convert("RGB")
+            try:
+                opened = _open_image(image_value)
+                try:
+                    oriented = ImageOps.exif_transpose(opened)
+                    try:
+                        img = oriented.convert("RGB")
+                    finally:
+                        if oriented is not opened:
+                            oriented.close()
+                finally:
+                    opened.close()
+                img = resize_long_edge(img, self.max_image_dimension)
+            except (OSError, TypeError, ValueError) as exc:
+                print(f"WARNING: skipping unreadable image {image_value!r}: {exc}")
+                continue
             bw, bh = _get_bucket(img.width, img.height, self.buckets)
             img, content_mask = resize_full_frame(img, (bw, bh))
             img_tensor = transforms.ToTensor()(img) * 2 - 1
@@ -152,7 +265,7 @@ class BucketBatchDataset(IterableDataset):
 
 
 def make_streaming_dataloader(
-    repo: str,
+    data_sources: Sequence[str] | str,
     phase: int,
     epoch: int,
     max_samples: int,
@@ -162,22 +275,52 @@ def make_streaming_dataloader(
     base_seed: int = 1234,
     buckets=BUCKETS,
     drop_last: bool = True,
+    max_image_dimension: int = 1024,
 ) -> DataLoader:
-    """Create a streaming DataLoader with epoch-aware shuffle seed."""
+    """Create a loader from local Parquet locations and/or HF repositories."""
     from datasets import load_dataset
 
-    ds_full = load_dataset(repo, split="train", streaming=True)
+    if isinstance(data_sources, str):
+        data_sources = [data_sources]
+    data_sources = list(data_sources)
+    if not data_sources:
+        raise ValueError("data_sources must not be empty")
+
     shuffle_seed = base_seed + 1000 * int(phase) + int(epoch)
-    if shuffle:
-        ds_full = ds_full.shuffle(buffer_size=shuffle_buffer, seed=shuffle_seed)
+    loaded_sources = []
+    for source in data_sources:
+        parquet_files = _local_parquet_files(source)
+        if parquet_files:
+            source_specs = [
+                ("parquet", {"train": [parquet_file]},
+                 str(Path(parquet_file).parent))
+                for parquet_file in parquet_files
+            ]
+        else:
+            source_specs = [(source, None, "")]
+        for dataset_name, data_files, source_root in source_specs:
+            kwargs = {"split": "train", "streaming": True}
+            if data_files is not None:
+                kwargs["data_files"] = data_files
+            dataset = load_dataset(dataset_name, **kwargs)
+            if shuffle:
+                dataset = dataset.shuffle(
+                    buffer_size=shuffle_buffer,
+                    seed=shuffle_seed + len(loaded_sources),
+                )
+            loaded_sources.append((dataset, source_root))
+
+    ds_full = RoundRobinSources(loaded_sources, seed=shuffle_seed)
     samples = StreamingSDDataset(
-        ds_full, max_samples=max_samples, buckets=buckets)
+        ds_full, max_samples=max_samples, buckets=buckets,
+        max_image_dimension=max_image_dimension)
     ds = BucketBatchDataset(
         samples, batch_size=batch_size, drop_last=drop_last)
     dl = DataLoader(ds, batch_size=None, num_workers=0)
     print(
         f"DataLoader phase={phase} epoch={epoch} max_samples={max_samples} "
         f"batch={batch_size} buckets={list(map(tuple, buckets))} "
+        f"max_image_dimension={max_image_dimension} sources={data_sources} "
         f"drop_last={drop_last} shuffle={shuffle} seed={shuffle_seed}"
     )
     return dl
