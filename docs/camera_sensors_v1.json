@@ -5,27 +5,42 @@
     "canon|canon eos 100d": {
       "sensor_width_mm": 22.3,
       "sensor_height_mm": 14.9,
-      "source": "Canon EOS 100D published specifications"
+      "source_url": "https://asia.canon/en/support/6200162100",
+      "source_title": "Specifications (EOS REBEL SL1 / EOS 100D)",
+      "specification_id": "Canon issue 6200162100, updated 2013-03-21",
+      "retrieved_date": "2026-07-13"
     },
     "canon|canon eos 50d": {
       "sensor_width_mm": 22.3,
       "sensor_height_mm": 14.9,
-      "source": "Canon EOS 50D published specifications"
+      "source_url": "https://asia.canon/en/support/6200026200",
+      "source_title": "EOS 50D Specification",
+      "specification_id": "Canon issue 6200026200, updated 2008-09-19",
+      "retrieved_date": "2026-07-13"
     },
     "canon|canon eos 5d": {
       "sensor_width_mm": 35.8,
       "sensor_height_mm": 23.9,
-      "source": "Canon EOS 5D published specifications"
+      "source_url": "https://www.usa.canon.com/support/p/eos-5d",
+      "source_title": "Canon Support for EOS 5D - Main Unit Specs",
+      "specification_id": "EOS 5D technical specifications, Image Format",
+      "retrieved_date": "2026-07-13"
     },
     "canon|canon eos 5d mark iv": {
       "sensor_width_mm": 36.0,
       "sensor_height_mm": 24.0,
-      "source": "Canon EOS 5D Mark IV published specifications"
+      "source_url": "https://asia.canon/en/support/6200376100",
+      "source_title": "Specifications (EOS 5D Mark IV)",
+      "specification_id": "Canon issue 6200376100, updated 2016-09-16",
+      "retrieved_date": "2026-07-13"
     },
     "nikon corporation|nikon d850": {
       "sensor_width_mm": 35.9,
       "sensor_height_mm": 23.9,
-      "source": "Nikon D850 published specifications"
+      "source_url": "https://www.nikonusa.com/p/d850/1585/overview",
+      "source_title": "D850 Full Frame Digital SLR Camera - Tech Specs",
+      "specification_id": "Nikon product 1585, Sensor Size",
+      "retrieved_date": "2026-07-13"
     }
   }
 }

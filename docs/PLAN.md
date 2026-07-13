@@ -40,11 +40,18 @@ the primary diagnostic and CFG-delta sensitivity is secondary. Camera artifacts
 now carry an exact versioned semantic schema and incompatible camera state fails
 at load. The P3/CLIP moving-teacher combination is rejected by config validation.
 
-The committed local audit and sensor table expose only 288 strictly validated
-geometry records, not the earlier provisional 1,191. The next implementation
-gate before P3a/P3b training is the versioned manifest builder plus separate
-trusted-geometry, raw-focal, and exposure residual heads. Offline weighted
-manifests, label-null controls, and camera/lens holdouts follow; controlled
+Camera schema v3 separates trusted FOV, experimental raw focal, exposure, and
+optional capture into independently centered heads. Runtime 35 mm-equivalent
+conversion is removed; manifests must provide axis-specific `vertical_fov_deg`.
+ELLA and SaRA have separate metadata-dropout settings validated after CLI phase
+selection. `config_camera_p3.json` is diagnostic-only. The former 25k Unsplash
+run is quarantined in `config_camera_raw_focal_experimental.json` and requires an
+explicit experimental opt-in.
+
+The committed local audit and sensor table prove a record-level conjunction of
+288 strictly validated geometry records, not the earlier provisional 1,191.
+The next implementation gate before P3a/P3b training is the versioned offline
+manifest builder, including label-null controls and camera/lens holdouts. Controlled
 paired or synthetic data remains required before any physical-control claim.
 
 ## Vision
@@ -189,8 +196,9 @@ Two injection points, in order of preference:
    semantically right. Every head is a permanently centered residual
    `head(value) - head(unknown)`, not merely zero-initialized. Metadata-free
    generation therefore remains exactly on the P1/P2 path after training.
-   - Condition on **vertical FOV** (or log-focal normalized by sensor height), not raw
-     focal length in mm — resolution/crop invariant.
+   - Condition the trusted head on manifest-provided **vertical FOV**, not raw
+     focal length in mm. Any 35 mm-equivalent conversion must be axis- and
+     aspect-aware preprocessing, never a training-time 24 mm assumption.
    - Candidate signals, most valuable first: trusted FOV/35 mm equivalent,
      aperture, exposure time, ISO and flash. Disable photo/render/artwork until a
      source with meaningful render and artwork coverage is added.

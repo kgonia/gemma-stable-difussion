@@ -42,9 +42,11 @@ from pure_ella.dataset import (
     resize_long_edge,
 )
 from pure_ella.diagnostics import (
+    guided_prediction,
     suffix_counterfactual_sensitivity,
     validate_suffix_counterfactual_token_boundaries,
 )
+from scripts.audit_camera_metadata import classify_geometry_record
 from pure_ella.sara import (
     build_sara_attn2_kv_sparse_masks,
     capture_sara_selected_values,
@@ -79,11 +81,11 @@ class ConnectorTrainingTests(unittest.TestCase):
         self.assertEqual(condition[4:8].tolist(), [0.0, 1.0, 1.0, 1.0])
         self.assertEqual(condition[-1].item(), 1.0)
 
-    def test_35mm_equivalent_is_safely_converted_to_vertical_fov(self):
+    def test_35mm_equivalent_requires_offline_axis_fov(self):
         metadata = extract_camera_metadata({
             "metadata": {"focal_length_35mm": 50},
         })
-        self.assertAlmostEqual(metadata["vertical_fov_deg"], 26.99, places=2)
+        self.assertIsNone(metadata["vertical_fov_deg"])
 
     def test_camera_metadata_merges_all_nested_containers(self):
         metadata = extract_camera_metadata({
@@ -132,7 +134,8 @@ class ConnectorTrainingTests(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(conditioner(condition)).item(), 0)
         conditioner(condition).sum().backward()
         self.assertGreater(
-            torch.count_nonzero(conditioner.mlp[-1].weight.grad).item(), 0)
+            torch.count_nonzero(
+                conditioner.geometry_head.mlp[-1].weight.grad).item(), 0)
 
     def test_camera_conditioner_uses_diffusers_class_embedding_contract(self):
         from diffusers import UNet2DConditionModel
@@ -193,13 +196,28 @@ class ConnectorTrainingTests(unittest.TestCase):
             output_dim=2, hidden_dim=8, fourier_bands=2,
             use_capture_type=False)
         with torch.no_grad():
-            conditioner.mlp[-1].weight.fill_(0.1)
+            conditioner.geometry_head.mlp[-1].weight.fill_(0.1)
         photo = make_camera_condition(
             vertical_fov_deg=35, capture_type="photo").unsqueeze(0)
         artwork = make_camera_condition(
             vertical_fov_deg=35, capture_type="artwork").unsqueeze(0)
 
         self.assertTrue(torch.equal(conditioner(photo), conditioner(artwork)))
+
+    def test_camera_scalar_groups_have_separate_parameters(self):
+        conditioner = CameraConditioner(
+            output_dim=2, hidden_dim=8, fourier_bands=2,
+            enable_raw_focal_head=True,
+            enable_exposure_head=True,
+        )
+        condition = make_camera_condition(vertical_fov_deg=35).unsqueeze(0)
+        conditioner(condition).sum().backward()
+
+        self.assertGreater(torch.count_nonzero(
+            conditioner.geometry_head.mlp[-1].weight.grad).item(), 0)
+        for head in (conditioner.raw_focal_head, conditioner.exposure_head):
+            gradient = head.mlp[-1].weight.grad
+            self.assertTrue(gradient is None or torch.count_nonzero(gradient) == 0)
 
     def test_camera_checkpoint_schema_rejects_semantic_mismatch(self):
         cfg = TrainConfig()
@@ -218,21 +236,104 @@ class ConnectorTrainingTests(unittest.TestCase):
             _validate_camera_checkpoint_schema(checkpoint, state, "test.pt")
 
     def test_config_rejects_camera_with_active_clip_teacher(self):
+        cfg = TrainConfig(
+            camera_conditioning_enabled=True,
+            camera_experiment_mode="raw_focal_baseline",
+            camera_allow_experimental_training=True,
+            camera_enable_geometry_head=False,
+            camera_enable_raw_focal_head=True,
+            use_clip_teacher_delta=True,
+            lambda_teacher=1.0,
+        )
         with self.assertRaisesRegex(ValueError, "teacher target move"):
-            TrainConfig(
-                camera_conditioning_enabled=True,
-                camera_metadata_dropout_prob=0.0,
-                use_clip_teacher_delta=True,
-                lambda_teacher=1.0,
-            )
+            cfg.validate_requested_phases({"ella"})
+
+        diagnostic = TrainConfig(
+            run_mode="diagnostic",
+            camera_conditioning_enabled=True,
+            use_clip_teacher_delta=True,
+            lambda_teacher=1.0,
+        )
+        diagnostic.validate_requested_phases({"ella"})
 
     def test_config_rejects_dropout_for_camera_only_training(self):
-        with self.assertRaisesRegex(ValueError, "camera-only training"):
-            TrainConfig(
-                camera_conditioning_enabled=True,
-                camera_train_connector=False,
-                camera_metadata_dropout_prob=0.4,
-            )
+        cfg = TrainConfig(
+            camera_conditioning_enabled=True,
+            camera_train_connector=False,
+            camera_experiment_mode="raw_focal_baseline",
+            camera_allow_experimental_training=True,
+            camera_enable_geometry_head=False,
+            camera_enable_raw_focal_head=True,
+            camera_metadata_dropout_prob_ella=0.4,
+        )
+        with self.assertRaisesRegex(ValueError, "camera-only ELLA"):
+            cfg.validate_requested_phases({"ella", "sara"})
+        cfg.validate_requested_phases({"sara"})
+
+    def test_camera_training_requires_explicit_mode(self):
+        cfg = TrainConfig(camera_conditioning_enabled=True)
+        with self.assertRaisesRegex(ValueError, "Camera training is disabled"):
+            cfg.validate_requested_phases({"ella"})
+
+        raw = TrainConfig(
+            camera_conditioning_enabled=True,
+            camera_experiment_mode="raw_focal_baseline",
+            camera_enable_geometry_head=False,
+            camera_enable_raw_focal_head=True,
+        )
+        with self.assertRaisesRegex(ValueError, "experimental_training"):
+            raw.validate_requested_phases({"ella"})
+
+    def test_guided_prediction_uses_unconditional_plus_scaled_delta(self):
+        conditional = torch.tensor([[[[5.0]]]])
+        unconditional = torch.tensor([[[[2.0]]]])
+        actual = guided_prediction(conditional, unconditional, guidance=4.0)
+        self.assertTrue(torch.equal(actual, torch.tensor([[[[14.0]]]])))
+
+    def test_strict_geometry_audit_requires_provenance_conjunction(self):
+        sensor_table = {
+            "test|camera": {"sensor_width_mm": 36.0, "sensor_height_mm": 24.0}
+        }
+        resolution = 6000 / 36.0 * 25.4
+        exif = {
+            "Make": "Test",
+            "Model": "Camera",
+            "ExifImageWidth": 6000,
+            "ExifImageHeight": 4000,
+            "FocalPlaneXResolution": resolution,
+            "FocalPlaneYResolution": resolution,
+            "FocalPlaneResolutionUnit": 2,
+            "FocalLength": 50,
+            "Orientation": 1,
+        }
+        eligible = classify_geometry_record(
+            (6000, 4000), exif, "false", sensor_table)
+        self.assertTrue(eligible["strict_geometry_eligible"])
+        self.assertEqual(eligible["dimension_status"], "exact")
+
+        unexplained_swap = classify_geometry_record(
+            (4000, 6000), exif, "false", sensor_table)
+        self.assertFalse(unexplained_swap["strict_geometry_eligible"])
+        self.assertEqual(
+            unexplained_swap["dimension_status"], "unexplained_swap")
+
+        exif["Orientation"] = 6
+        corrected = classify_geometry_record(
+            (4000, 6000), exif, "false", sensor_table)
+        self.assertTrue(corrected["strict_geometry_eligible"])
+        self.assertEqual(
+            corrected["dimension_status"], "orientation_corrected")
+
+        cropped = classify_geometry_record(
+            (6000, 4000), exif, "true", sensor_table)
+        self.assertFalse(cropped["strict_geometry_eligible"])
+        self.assertIn("crop_true", cropped["rejection_reasons"])
+
+        exif["FocalPlaneResolutionUnit"] = 1
+        invalid_unit = classify_geometry_record(
+            (6000, 4000), exif, "false", sensor_table)
+        self.assertFalse(invalid_unit["strict_geometry_eligible"])
+        self.assertEqual(invalid_unit["sensor_status"], "not_derivable")
 
     def test_camera_dropout_replaces_entire_record_with_unknown(self):
         condition = torch.stack([
@@ -513,13 +614,12 @@ class ConnectorTrainingTests(unittest.TestCase):
         self.assertNotEqual(connector.scale.grad.item(), 0.0)
 
         cfg.camera_conditioning_enabled = True
-        cfg.camera_metadata_dropout_prob = 0.0
         state.camera_metadata_logged = True
         state.camera_metadata_samples = 0
         state.camera_presence_counts = [0, 0, 0, 0]
         conditioner = CameraConditioner(
             output_dim=1, hidden_dim=8, fourier_bands=2,
-            capture_embed_dim=4)
+            capture_embed_dim=4, enable_raw_focal_head=True)
         install_camera_conditioner(state.unet, conditioner)
         batch["camera_condition"] = make_camera_condition(
             focal_length_mm=35, capture_type="photo").unsqueeze(0)
@@ -529,7 +629,8 @@ class ConnectorTrainingTests(unittest.TestCase):
         output.loss.backward()
 
         self.assertGreater(
-            torch.count_nonzero(conditioner.mlp[-1].weight.grad).item(), 0)
+            torch.count_nonzero(
+                conditioner.raw_focal_head.mlp[-1].weight.grad).item(), 0)
         self.assertEqual(state.camera_metadata_samples, 1)
         self.assertEqual(state.camera_presence_counts, [0, 1, 0, 0])
 

@@ -174,6 +174,13 @@ def _rel_diff(a, b, eps: float = 1e-8) -> float:
     return float((a - b).pow(2).mean().sqrt().item() / (b.pow(2).mean().sqrt().item() + eps))
 
 
+def guided_prediction(
+    conditional: torch.Tensor, unconditional: torch.Tensor, guidance: float,
+) -> torch.Tensor:
+    """Return the classifier-free guided prediction."""
+    return unconditional + float(guidance) * (conditional - unconditional)
+
+
 # ---------------------------------------------------------------------------
 # Generation helpers
 # ---------------------------------------------------------------------------
@@ -427,8 +434,10 @@ def camera_counterfactual_sensitivity(
         delta_a = predictions[0][0:1] - predictions[0][1:2]
         delta_b = predictions[1][0:1] - predictions[1][1:2]
         sensitivity = _rel_diff(delta_a, delta_b)
-        guided_a = predictions[0][1:2] + cfg.val_guidance * delta_a
-        guided_b = predictions[1][1:2] + cfg.val_guidance * delta_b
+        guided_a = guided_prediction(
+            predictions[0][0:1], predictions[0][1:2], cfg.val_guidance)
+        guided_b = guided_prediction(
+            predictions[1][0:1], predictions[1][1:2], cfg.val_guidance)
         guided_rel_diff = _rel_diff(guided_a, guided_b)
         prediction_rel_diff = _rel_diff(predictions[0], predictions[1])
         print(

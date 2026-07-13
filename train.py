@@ -164,6 +164,7 @@ class DiffusionPhaseSpec:
     max_opt_steps: int
     semantic_anchor_weight: float
     use_teacher_delta: bool
+    camera_dropout_probability: float
 
 
 @dataclass
@@ -465,6 +466,9 @@ def build_camera_conditioner(state: TrainingState):
         output_dim=time_embed_dim,
         hidden_dim=state.cfg.camera_hidden_dim,
         fourier_bands=state.cfg.camera_fourier_bands,
+        enable_geometry_head=state.cfg.camera_enable_geometry_head,
+        enable_raw_focal_head=state.cfg.camera_enable_raw_focal_head,
+        enable_exposure_head=state.cfg.camera_enable_exposure_head,
         use_capture_type=state.cfg.camera_use_capture_type,
     ).to(device=state.device, dtype=state.unet_dtype)
     install_camera_conditioner(state.unet, state.camera_conditioner)
@@ -483,6 +487,9 @@ def _camera_schema(state: TrainingState) -> dict | None:
     if state.camera_conditioner is None:
         return None
     return camera_condition_schema(
+        enable_geometry_head=state.cfg.camera_enable_geometry_head,
+        enable_raw_focal_head=state.cfg.camera_enable_raw_focal_head,
+        enable_exposure_head=state.cfg.camera_enable_exposure_head,
         use_capture_type=state.cfg.camera_use_capture_type)
 
 
@@ -795,6 +802,7 @@ def diffusion_training_step(
     *,
     use_teacher_delta: bool,
     semantic_anchor_weight: float,
+    camera_dropout_probability: float = 0.0,
     clip_geom: Optional[ClipGeometryLoss] = None,
 ) -> DiffusionStepOutput:
     """Run one Phase 1/2 forward pass and assemble the common loss."""
@@ -831,7 +839,7 @@ def diffusion_training_step(
         camera_condition = raw_camera_condition.to(
             device=state.device, dtype=torch.float32)
         camera_condition = apply_camera_dropout(
-            camera_condition, cfg.camera_metadata_dropout_prob)
+            camera_condition, camera_dropout_probability)
 
     with torch.no_grad():
         with model_autocast(state):
@@ -1056,6 +1064,7 @@ def run_diffusion_training_loop(
                 opt_step,
                 use_teacher_delta=spec.use_teacher_delta,
                 semantic_anchor_weight=spec.semantic_anchor_weight,
+                camera_dropout_probability=spec.camera_dropout_probability,
                 clip_geom=clip_geom,
             )
             output.loss.backward()
@@ -1207,6 +1216,7 @@ def run_ella_training(state: TrainingState):
             max_opt_steps=cfg.ella_max_opt_steps,
             semantic_anchor_weight=cfg.phase1_semantic_anchor_weight,
             use_teacher_delta=use_teacher_delta,
+            camera_dropout_probability=cfg.camera_metadata_dropout_prob_ella,
         ),
         optimizer,
         trainable_params,
@@ -1342,6 +1352,7 @@ def run_sara_training(state: TrainingState):
             max_opt_steps=cfg.sara_max_opt_steps,
             semantic_anchor_weight=cfg.phase2_semantic_anchor_weight,
             use_teacher_delta=use_teacher_delta_phase2,
+            camera_dropout_probability=cfg.camera_metadata_dropout_prob_sara,
         ),
         optimizer,
         trainable_params,
@@ -1642,6 +1653,9 @@ def run_reload_proof(state: TrainingState):
             output_dim=reloaded_unet.time_embedding.linear_2.out_features,
             hidden_dim=cfg.camera_hidden_dim,
             fourier_bands=cfg.camera_fourier_bands,
+            enable_geometry_head=cfg.camera_enable_geometry_head,
+            enable_raw_focal_head=cfg.camera_enable_raw_focal_head,
+            enable_exposure_head=cfg.camera_enable_exposure_head,
             use_capture_type=cfg.camera_use_capture_type,
         ).to(device=state.device, dtype=state.unet_dtype)
         reloaded_camera.load_state_dict(
@@ -1859,6 +1873,11 @@ def main():
     print(f"Phases: {sorted(phases_requested)}")
 
     cfg = TrainConfig.from_json(config_path)
+    try:
+        cfg.validate_requested_phases(phases_requested)
+    except ValueError as error:
+        print(f"ERROR: {error}")
+        sys.exit(1)
     seed_everything(cfg.base_seed)
 
     resume_path = args.resume_ckpt or cfg.init_connector_ckpt_path

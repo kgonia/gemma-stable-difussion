@@ -136,7 +136,16 @@ class TrainConfig:
     # --- P3 camera metadata conditioning ---
     camera_conditioning_enabled: bool = False
     camera_train_connector: bool = False
-    camera_metadata_dropout_prob: float = 0.4
+    camera_experiment_mode: Literal[
+        "disabled", "raw_focal_baseline", "p3a_geometry", "p3b_mixed"
+    ] = "disabled"
+    camera_allow_experimental_training: bool = False
+    camera_manifest_verified: bool = False
+    camera_metadata_dropout_prob_ella: float = 0.0
+    camera_metadata_dropout_prob_sara: float = 0.1
+    camera_enable_geometry_head: bool = True
+    camera_enable_raw_focal_head: bool = False
+    camera_enable_exposure_head: bool = False
     camera_use_capture_type: bool = False
     camera_lr: float = 1e-4
     camera_hidden_dim: int = 512
@@ -271,26 +280,22 @@ class TrainConfig:
             )
         if not 0.0 <= self.conditioning_dropout_prob < 1.0:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")
-        if not 0.0 <= self.camera_metadata_dropout_prob < 1.0:
-            raise ValueError("camera_metadata_dropout_prob must be in [0, 1)")
-        if (self.run_training and self.camera_conditioning_enabled
-                and not self.camera_train_connector and not self.run_sara_phase
-                and self.camera_metadata_dropout_prob != 0.0):
+        camera_dropouts = (
+            self.camera_metadata_dropout_prob_ella,
+            self.camera_metadata_dropout_prob_sara,
+        )
+        if not all(0.0 <= value < 1.0 for value in camera_dropouts):
+            raise ValueError("camera metadata dropout probabilities must be in [0, 1)")
+        if self.camera_experiment_mode not in {
+            "disabled", "raw_focal_baseline", "p3a_geometry", "p3b_mixed"
+        }:
             raise ValueError(
-                "camera-only training requires camera_metadata_dropout_prob=0: "
-                "a permanently centered unknown record has zero camera gradient"
+                f"Unknown camera_experiment_mode: {self.camera_experiment_mode}"
             )
         if self.camera_hidden_dim <= 0 or self.camera_fourier_bands <= 0:
             raise ValueError("camera conditioner dimensions must be positive")
         if self.camera_lr <= 0:
             raise ValueError("camera_lr must be positive")
-        if (self.camera_conditioning_enabled and self.use_clip_teacher_delta
-                and (self.lambda_teacher > 0 or self.lambda_text_delta > 0)):
-            raise ValueError(
-                "CLIP teacher-delta cannot be enabled with a trainable camera "
-                "conditioner: it would make the teacher target move after each "
-                "optimizer step"
-            )
         if not (0 < self.camera_counterfactual_fov_a <= 180
                 and 0 < self.camera_counterfactual_fov_b <= 180):
             raise ValueError("camera counterfactual FOV values must be in (0, 180]")
@@ -393,11 +398,78 @@ class TrainConfig:
         )
         print(
             f"Camera conditioning: {self.camera_conditioning_enabled} "
-            f"dropout={self.camera_metadata_dropout_prob} "
+            f"mode={self.camera_experiment_mode} "
+            f"dropout_ella={self.camera_metadata_dropout_prob_ella} "
+            f"dropout_sara={self.camera_metadata_dropout_prob_sara} "
             f"train_connector={self.camera_train_connector} "
             f"capture_type={self.camera_use_capture_type}"
         )
         print(f"Output: {self.output_dir}")
+
+    def validate_requested_phases(self, phases: set[str]) -> None:
+        """Validate camera policy after CLI phase selection is known."""
+        active_training = self.run_training and bool({"ella", "sara"} & phases)
+        if not self.camera_conditioning_enabled or not active_training:
+            return
+        mode = self.camera_experiment_mode
+        if mode == "disabled":
+            raise ValueError(
+                "Camera training is disabled. Select an explicit "
+                "camera_experiment_mode before running ELLA or SaRA."
+            )
+        if self.camera_train_connector:
+            raise ValueError(
+                f"{mode} requires camera_train_connector=false; joint camera/text "
+                "training is reserved for a future P3d mode"
+            )
+        if mode == "raw_focal_baseline":
+            if not self.camera_allow_experimental_training:
+                raise ValueError(
+                    "raw_focal_baseline requires "
+                    "camera_allow_experimental_training=true"
+                )
+            if (self.camera_enable_geometry_head
+                    or not self.camera_enable_raw_focal_head
+                    or self.camera_enable_exposure_head
+                    or self.camera_use_capture_type):
+                raise ValueError(
+                    "raw_focal_baseline requires only the raw-focal head"
+                )
+        elif mode == "p3a_geometry":
+            if not self.camera_manifest_verified:
+                raise ValueError("p3a_geometry requires a verified camera manifest")
+            if (not self.camera_enable_geometry_head
+                    or self.camera_enable_raw_focal_head
+                    or self.camera_enable_exposure_head
+                    or self.camera_use_capture_type):
+                raise ValueError("p3a_geometry must train only the trusted-FOV head")
+        elif mode == "p3b_mixed":
+            if not self.camera_manifest_verified:
+                raise ValueError("p3b_mixed requires a verified mixed manifest")
+            if (not self.camera_enable_geometry_head
+                    or self.camera_enable_raw_focal_head
+                    or not self.camera_enable_exposure_head
+                    or self.camera_use_capture_type):
+                raise ValueError(
+                    "p3b_mixed requires trusted-FOV and exposure heads, without raw focal"
+                )
+        if ("ella" in phases and not self.camera_train_connector
+                and self.camera_metadata_dropout_prob_ella != 0.0):
+            raise ValueError(
+                "camera-only ELLA requires camera_metadata_dropout_prob_ella=0: "
+                "centered unknown records have zero camera gradient"
+            )
+        teacher_active = (
+            self.use_clip_teacher_delta
+            and (self.lambda_teacher > 0 or self.lambda_text_delta > 0)
+            and ("ella" in phases or (
+                "sara" in phases and self.use_clip_teacher_delta_phase2))
+        )
+        if teacher_active:
+            raise ValueError(
+                "CLIP teacher-delta cannot train with a camera conditioner: "
+                "the shared conditioner would make the teacher target move"
+            )
 
     @classmethod
     def from_json(cls, path: str) -> "TrainConfig":

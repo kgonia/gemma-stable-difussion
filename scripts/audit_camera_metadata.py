@@ -13,7 +13,7 @@ from typing import Any
 from PIL import ExifTags, Image
 
 
-AUDIT_SCHEMA_VERSION = 1
+AUDIT_SCHEMA_VERSION = 2
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 UNIT_MM = {2: 25.4, 3: 10.0, 4: 1.0, 5: 0.001}
 SWAPPED_ORIENTATIONS = {5, 6, 7, 8}
@@ -50,6 +50,17 @@ def _load_sensor_table(path: Path) -> tuple[dict, str]:
     table = json.loads(raw)
     if table.get("schema_version") != 1 or not isinstance(table.get("models"), dict):
         raise ValueError(f"Unsupported sensor table schema: {path}")
+    required = {
+        "sensor_width_mm", "sensor_height_mm", "source_url", "source_title",
+        "specification_id", "retrieved_date",
+    }
+    for model, record in table["models"].items():
+        missing = sorted(required - set(record))
+        if missing:
+            raise ValueError(
+                f"Sensor table entry {model!r} lacks provenance: {missing}")
+        if not str(record["source_url"]).startswith("https://"):
+            raise ValueError(f"Sensor table entry {model!r} needs an HTTPS source")
     return table["models"], hashlib.sha256(raw).hexdigest()
 
 
@@ -71,6 +82,67 @@ def _derived_sensor(exif: dict[str, Any]) -> tuple[float, float] | None:
     if not dimensions or not x_resolution or not y_resolution or unit is None:
         return None
     return dimensions[0] / x_resolution * unit, dimensions[1] / y_resolution * unit
+
+
+def _dimension_status(
+    decoded_size: tuple[int, int], exif: dict[str, Any],
+) -> str:
+    dimensions = _dimension_pair(exif)
+    if dimensions is None:
+        return "missing"
+    if decoded_size == dimensions:
+        return "exact"
+    orientation = int(_number(exif.get("Orientation")) or 1)
+    if decoded_size == dimensions[::-1]:
+        return (
+            "orientation_corrected"
+            if orientation in SWAPPED_ORIENTATIONS else "unexplained_swap"
+        )
+    return "mismatch"
+
+
+def classify_geometry_record(
+    decoded_size: tuple[int, int], exif: dict[str, Any], crop_state: str,
+    sensor_table: dict,
+) -> dict:
+    """Classify strict geometry eligibility with explicit rejection reasons."""
+    dimension_status = _dimension_status(decoded_size, exif)
+    derived = _derived_sensor(exif)
+    make = _text(exif.get("Make"))
+    model = _text(exif.get("Model"))
+    known = sensor_table.get(_sensor_key(make, model))
+    if derived is None:
+        sensor_status = "not_derivable"
+    elif known is None:
+        sensor_status = "unknown_model"
+    else:
+        derived_diagonal = math.hypot(*derived)
+        known_diagonal = math.hypot(
+            float(known["sensor_width_mm"]),
+            float(known["sensor_height_mm"]),
+        )
+        sensor_status = (
+            "within_10_percent"
+            if abs(derived_diagonal / known_diagonal - 1.0) <= 0.10
+            else "outlier"
+        )
+    focal_present = _number(exif.get("FocalLength")) is not None
+    reasons = []
+    if dimension_status not in {"exact", "orientation_corrected"}:
+        reasons.append(f"dimension_{dimension_status}")
+    if crop_state != "false":
+        reasons.append(f"crop_{crop_state}")
+    if sensor_status != "within_10_percent":
+        reasons.append(f"sensor_{sensor_status}")
+    if not focal_present:
+        reasons.append("missing_focal_length")
+    return {
+        "dimension_status": dimension_status,
+        "sensor_status": sensor_status,
+        "crop_state": crop_state,
+        "strict_geometry_eligible": not reasons,
+        "rejection_reasons": reasons,
+    }
 
 
 def _xmp_crop_state(path: Path) -> str:
@@ -144,36 +216,31 @@ def audit(images_root: Path, sensor_table_path: Path) -> dict:
         if lens:
             lenses[lens] += 1
 
-        exif_dimensions = _dimension_pair(exif)
-        if exif_dimensions:
+        crop_state = _xmp_crop_state(path)
+        classification = classify_geometry_record(
+            decoded_size, exif, crop_state, sensor_table)
+        dimension_status = classification["dimension_status"]
+        sensor_status = classification["sensor_status"]
+        counts[f"dimension_{dimension_status}"] += 1
+        counts[f"sensor_{sensor_status}"] += 1
+        counts[f"xmp_crop_{crop_state}"] += 1
+        if _dimension_pair(exif) is not None:
             counts["exif_pixel_dimensions"] += 1
-            orientation = int(_number(exif.get("Orientation")) or 1)
-            expected = (
-                exif_dimensions[::-1]
-                if orientation in SWAPPED_ORIENTATIONS else exif_dimensions
-            )
-            if decoded_size == expected or sorted(decoded_size) == sorted(exif_dimensions):
-                counts["decoded_exif_dimensions_match"] += 1
-            else:
-                counts["decoded_exif_dimensions_mismatch"] += 1
-
-        derived = _derived_sensor(exif)
-        if derived:
+        if _derived_sensor(exif) is not None:
             counts["focal_plane_sensor_derived"] += 1
-            known = sensor_table.get(_sensor_key(make, model))
-            if known:
-                counts["sensor_table_model_match"] += 1
-                derived_diagonal = math.hypot(*derived)
-                known_diagonal = math.hypot(
-                    float(known["sensor_width_mm"]),
-                    float(known["sensor_height_mm"]),
-                )
-                if abs(derived_diagonal / known_diagonal - 1.0) <= 0.10:
-                    counts["sensor_diagonal_within_10_percent"] += 1
-                else:
-                    counts["sensor_diagonal_outlier"] += 1
-
-        counts[f"xmp_crop_{_xmp_crop_state(path)}"] += 1
+        if sensor_status in {"within_10_percent", "outlier"}:
+            counts["sensor_table_model_match"] += 1
+        if sensor_status == "within_10_percent":
+            counts["sensor_diagonal_within_10_percent"] += 1
+        elif sensor_status == "outlier":
+            counts["sensor_diagonal_outlier"] += 1
+        if classification["strict_geometry_eligible"]:
+            counts["strict_geometry_eligible"] += 1
+        else:
+            primary = classification["rejection_reasons"][0]
+            counts[f"strict_primary_rejection_{primary}"] += 1
+            for reason in classification["rejection_reasons"]:
+                counts[f"strict_rejection_{reason}"] += 1
 
     return {
         "audit_schema_version": AUDIT_SCHEMA_VERSION,

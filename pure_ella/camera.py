@@ -13,7 +13,7 @@ import torch.nn as nn
 CAMERA_VALUE_COUNT = 4
 CAMERA_CONDITION_DIM = 9
 CAMERA_CAPTURE_TYPES = ("unknown", "photo", "render", "artwork")
-CAMERA_SCHEMA_VERSION = 2
+CAMERA_SCHEMA_VERSION = 3
 CAMERA_FEATURE_NAMES = (
     "vertical_fov_deg_normalized",
     "focal_length_mm_normalized",
@@ -28,7 +28,12 @@ CAMERA_FEATURE_NAMES = (
 _CAPTURE_TO_ID = {name: index for index, name in enumerate(CAMERA_CAPTURE_TYPES)}
 
 
-def camera_condition_schema(*, use_capture_type: bool) -> dict:
+def camera_condition_schema(
+    *, enable_geometry_head: bool = True,
+    enable_raw_focal_head: bool = False,
+    enable_exposure_head: bool = False,
+    use_capture_type: bool = False,
+) -> dict:
     """Return the semantic schema that must match exactly across checkpoints."""
     return {
         "version": CAMERA_SCHEMA_VERSION,
@@ -41,6 +46,19 @@ def camera_condition_schema(*, use_capture_type: bool) -> dict:
             "iso": "clip[12.5,409600]; log(x/100)/log(64)",
         },
         "unknown_centered": True,
+        "heads": {
+            "trusted_geometry": (
+                ["vertical_fov_deg"] if enable_geometry_head else []),
+            "raw_focal_experimental": (
+                ["focal_length_mm"] if enable_raw_focal_head else []),
+            "exposure": (
+                ["aperture_f_number", "iso"]
+                if enable_exposure_head else []),
+            "capture": (["capture_type"] if use_capture_type else []),
+        },
+        "enable_geometry_head": bool(enable_geometry_head),
+        "enable_raw_focal_head": bool(enable_raw_focal_head),
+        "enable_exposure_head": bool(enable_exposure_head),
         "use_capture_type": bool(use_capture_type),
     }
 
@@ -114,12 +132,6 @@ def extract_camera_metadata(sample: Mapping[str, Any]) -> dict:
 
     vertical_fov = _first_float(
         sources, "vertical_fov", "vertical_fov_deg", "fov_vertical_deg")
-    focal_35mm = _first_float(
-        sources, "focal_length_35mm", "focal_length_in_35mm_film",
-        "focal_length_35mm_equivalent")
-    if vertical_fov is None and focal_35mm is not None:
-        vertical_fov = math.degrees(2.0 * math.atan(24.0 / (2.0 * focal_35mm)))
-
     return {
         "vertical_fov_deg": vertical_fov,
         "focal_length_mm": _first_float(
@@ -187,6 +199,68 @@ def apply_camera_dropout(condition: torch.Tensor, probability: float) -> torch.T
     return dropped
 
 
+class _ScalarResidualHead(nn.Module):
+    """Centered residual head for one semantically isolated scalar group."""
+
+    def __init__(self, value_indices: tuple[int, ...], output_dim: int,
+                 hidden_dim: int, fourier_bands: int):
+        super().__init__()
+        self.value_indices = value_indices
+        self.presence_indices = tuple(
+            CAMERA_VALUE_COUNT + index for index in value_indices)
+        self.register_buffer(
+            "frequencies",
+            torch.pi * (2.0 ** torch.arange(fourier_bands, dtype=torch.float32)),
+        )
+        value_count = len(value_indices)
+        input_dim = value_count * (2 + 2 * fourier_bands)
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def _features(self, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        values = condition[:, self.value_indices].float()
+        present = condition[:, self.presence_indices].float()
+        values = values * present
+        angles = values.unsqueeze(-1) * self.frequencies
+        fourier = torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(1)
+        features = torch.cat((values, fourier, present), dim=1)
+        return features.to(dtype=self.mlp[0].weight.dtype), present
+
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+        features, present = self._features(condition)
+        unknown_features, _ = self._features(torch.zeros_like(condition[:1]))
+        residual = self.mlp(features) - self.mlp(unknown_features)
+        return residual.masked_fill(present.eq(0).all(dim=1, keepdim=True), 0)
+
+
+class _CaptureResidualHead(nn.Module):
+    def __init__(self, output_dim: int, hidden_dim: int, capture_embed_dim: int):
+        super().__init__()
+        self.embedding = nn.Embedding(
+            len(CAMERA_CAPTURE_TYPES), int(capture_embed_dim))
+        self.mlp = nn.Sequential(
+            nn.Linear(int(capture_embed_dim), hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+        capture_ids = condition[:, -1].long().clamp(
+            0, len(CAMERA_CAPTURE_TYPES) - 1)
+        features = self.embedding(capture_ids)
+        unknown_features = self.embedding(
+            torch.zeros(1, device=condition.device, dtype=torch.long))
+        residual = self.mlp(features) - self.mlp(unknown_features)
+        return residual.masked_fill(capture_ids.eq(0).unsqueeze(1), 0)
+
+
 class CameraConditioner(nn.Module):
     """Map camera scalars into SD's timestep embedding space.
 
@@ -196,6 +270,9 @@ class CameraConditioner(nn.Module):
 
     def __init__(self, output_dim: int, hidden_dim: int = 512,
                  fourier_bands: int = 6, capture_embed_dim: int = 32,
+                 enable_geometry_head: bool = True,
+                 enable_raw_focal_head: bool = False,
+                 enable_exposure_head: bool = False,
                  use_capture_type: bool = False):
         super().__init__()
         if output_dim <= 0 or hidden_dim <= 0 or fourier_bands <= 0:
@@ -203,53 +280,45 @@ class CameraConditioner(nn.Module):
         self.output_dim = int(output_dim)
         self.hidden_dim = int(hidden_dim)
         self.fourier_bands = int(fourier_bands)
+        self.enable_geometry_head = bool(enable_geometry_head)
+        self.enable_raw_focal_head = bool(enable_raw_focal_head)
+        self.enable_exposure_head = bool(enable_exposure_head)
         self.use_capture_type = bool(use_capture_type)
         self.capture_embed_dim = (
             int(capture_embed_dim) if self.use_capture_type else 0)
-        self.register_buffer(
-            "frequencies",
-            torch.pi * (2.0 ** torch.arange(fourier_bands, dtype=torch.float32)),
+        self.geometry_head = (
+            _ScalarResidualHead((0,), output_dim, hidden_dim, fourier_bands)
+            if self.enable_geometry_head else None
         )
-        self.capture_embedding = (
-            nn.Embedding(len(CAMERA_CAPTURE_TYPES), self.capture_embed_dim)
+        self.raw_focal_head = (
+            _ScalarResidualHead((1,), output_dim, hidden_dim, fourier_bands)
+            if self.enable_raw_focal_head else None
+        )
+        self.exposure_head = (
+            _ScalarResidualHead((2, 3), output_dim, hidden_dim, fourier_bands)
+            if self.enable_exposure_head else None
+        )
+        self.capture_head = (
+            _CaptureResidualHead(output_dim, hidden_dim, self.capture_embed_dim)
             if self.use_capture_type else None
         )
-        input_dim = (
-            CAMERA_VALUE_COUNT * (1 + 2 * fourier_bands)
-            + CAMERA_VALUE_COUNT
-            + self.capture_embed_dim
-        )
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, output_dim),
-        )
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
 
-    def _features(self, condition: torch.Tensor) -> torch.Tensor:
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
         if condition.ndim != 2 or condition.shape[1] != CAMERA_CONDITION_DIM:
             raise ValueError(
                 f"camera condition must have shape [batch, {CAMERA_CONDITION_DIM}]"
             )
-        values = condition[:, :CAMERA_VALUE_COUNT].float()
-        present = condition[:, CAMERA_VALUE_COUNT:2 * CAMERA_VALUE_COUNT].float()
-        values = values * present
-        angles = values.unsqueeze(-1) * self.frequencies
-        fourier = torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(1)
-        parts = [values, fourier, present]
-        if self.capture_embedding is not None:
-            capture_ids = condition[:, -1].long().clamp(
-                0, len(CAMERA_CAPTURE_TYPES) - 1)
-            parts.append(self.capture_embedding(capture_ids))
-        return torch.cat(parts, dim=1).to(dtype=self.mlp[0].weight.dtype)
-
-    def forward(self, condition: torch.Tensor) -> torch.Tensor:
-        features = self._features(condition)
-        unknown_features = self._features(torch.zeros_like(condition))
-        residual = self.mlp(features) - self.mlp(unknown_features)
-        unknown = condition.eq(0).all(dim=1, keepdim=True)
-        return residual.masked_fill(unknown, 0)
+        heads = tuple(head for head in (
+            self.geometry_head, self.raw_focal_head,
+            self.exposure_head, self.capture_head,
+        ) if head is not None)
+        if not heads:
+            raise RuntimeError("Camera conditioner has no enabled heads")
+        result = heads[0](condition)
+        for head in heads[1:]:
+            result = result + head(condition)
+        return result.masked_fill(
+            condition.eq(0).all(dim=1, keepdim=True), 0)
 
     def unknown(self, batch_size: int, device: torch.device) -> torch.Tensor:
         return torch.zeros(

@@ -51,10 +51,11 @@ EXIF/XMP scan found:
 | Strict derived sensor diagonal within 10% of camera table | 288 |
 
 The original exploratory audit reported 1,191 plausible crop factors by using
-the decoded raster dimensions. The committed strict audit does not treat those
+the decoded raster dimensions. The committed v2 strict audit does not treat those
 dimensions as interchangeable with the EXIF dimensions associated with the
-focal-plane resolution: only 322 records prove the relationship and 288 pass
-the sensor-diagonal check. The remaining records need an ExifTool-based
+focal-plane resolution: only 322 records prove the relationship, and 288 satisfy
+the record-level conjunction of dimension match, no XMP crop, focal presence,
+and sensor-diagonal agreement. The remaining records need an ExifTool-based
 provenance recovery, native-dimension evidence, or rejection from the physical
 geometry subset. The distribution is also narrow: 795 images are from a Canon
 EOS 100D, and the collection contains only five camera models. This dataset
@@ -194,7 +195,8 @@ Use separate additive heads so dataset-specific missingness cannot become an
 easy source classifier:
 
 ```text
-geometry head: FOV or 35 mm-equivalent focal length
+geometry head: manifest-provided vertical FOV
+raw-focal head: raw focal length, experimental correlation baseline only
 exposure head: aperture, ISO, exposure time, flash
 capture head: photo/render/artwork (disabled until non-photo classes exist)
 ```
@@ -203,12 +205,13 @@ Each missing group independently contributes zero. Sum the three residuals into
 the UNet timestep embedding. Keep raw physical focal length out of the primary
 geometry head once sufficient FOV coverage exists.
 
-Implementation status (2026-07-13): permanent unknown centering, capture-input
-disablement, exact schema validation, metadata-container merging and guided
-counterfactual diagnostics are implemented. The current schema still uses one
-shared scalar head. Splitting trusted geometry, raw-focal and exposure heads is
-the next required code change before a P3a/P3b experiment; existing v1 camera
-checkpoints are intentionally incompatible with the centered v2 schema.
+Implementation status (2026-07-13): schema v3 implements independent permanently
+centered trusted-FOV, raw-focal, exposure and optional capture heads. Capture is
+disabled by default. Exact schema validation, metadata-container merging,
+guided counterfactual diagnostics, phase-specific dropout, and explicit camera
+experiment modes are implemented. Existing v1/v2 camera checkpoints are
+intentionally incompatible. The offline manifest builder remains the next P3a
+gate.
 
 With an exactly centered unknown residual and a frozen connector/UNet, complete
 metadata dropout produces zero camera gradient. Therefore set whole-record
@@ -340,4 +343,4 @@ sensor-table hash and audit-tool version. Private image paths or images do not
 need to be committed; the rules and aggregate artifact do.
 
 The initial strict local audit is committed as
-[`artifacts/pictures_training_camera_audit_v1.json`](artifacts/pictures_training_camera_audit_v1.json).
+[`artifacts/pictures_training_camera_audit_v2.json`](artifacts/pictures_training_camera_audit_v2.json).
