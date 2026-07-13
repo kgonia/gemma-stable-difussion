@@ -63,6 +63,20 @@ class TrainConfig:
     generation_grid_every_opt_steps: int = 500  # 0 = off; save image grid during training
     shuffle_streaming: bool = True
 
+    # Phase 0 can train without decoding images. When empty, the legacy image
+    # data path remains available for backward compatibility.
+    pretrain_prompt_sources: List[str] = field(default_factory=list)
+    pretrain_validation_prompt_sources: List[str] = field(default_factory=list)
+    pretrain_batch_size: int = 0  # 0 = train_batch_size
+    pretrain_max_gemma_len: int = 0  # 0 = max_gemma_len
+    pretrain_text_only_fast: bool = False
+    pretrain_validation_samples_per_source: int = 128
+    pretrain_validation_every_opt_steps: int = 250
+    pretrain_timestep_sampling: Literal["zero", "uniform"] = "uniform"
+    pretrain_num_train_timesteps: int = 1000
+    pretrain_validation_timesteps: List[int] = field(
+        default_factory=lambda: [0, 250, 500, 750, 999])
+
     # --- Model IDs ---
     gemma_id: str = "google/gemma-3-270m-it"
     gemma_layer_index: int = -1
@@ -75,7 +89,7 @@ class TrainConfig:
     mixed_precision: Literal["no", "bf16"] = "no"
 
     # --- Connector ---
-    connector_type: str = "ella_tsc"  # ella_tsc is the supported baseline
+    connector_type: str = "ella_tsc"  # or clip_gemma_residual_tsc
     connector_width: int = 768
     connector_layers: int = 6
     connector_heads: int = 8
@@ -93,6 +107,15 @@ class TrainConfig:
     init_connector_ckpt_path: str = ""
     init_connector_partial_warmstart: bool = False
     require_stage2_warmstart: bool = False
+
+    # --- CLIP-preserving residual connector ---
+    # These are deliberately separate from the legacy teacher/anchor losses:
+    # the residual is regularized against native CLIP, not trained to replace it.
+    residual_strength: float = 1.0
+    residual_prefix_weight: float = 0.1
+    residual_norm_weight: float = 0.01
+    residual_penalty_floor: float = 0.0
+    residual_checkpoint_every_opt_steps: int = 250
 
     # --- Learning rates ---
     pretrain_lr: float = 1e-4
@@ -240,6 +263,8 @@ class TrainConfig:
     wandb_enabled: bool = True
     wandb_project: str = "gemma3-sd-pure-ella"
     wandb_entity: str = ""
+    wandb_run_name: str = ""
+    wandb_group: str = ""
 
     # --- Output ---
     output_dir: str = "./output"
@@ -280,6 +305,24 @@ class TrainConfig:
             )
         if not 0.0 <= self.conditioning_dropout_prob < 1.0:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")
+        if self.connector_type == "clip_gemma_residual_tsc":
+            if self.run_clip_alignment_pretrain:
+                raise ValueError(
+                    "clip_gemma_residual_tsc skips prompt-only Phase 0; "
+                    "set run_clip_alignment_pretrain=false")
+            if self.conditioning_dropout_prob != 0.0:
+                raise ValueError(
+                    "clip_gemma_residual_tsc requires conditioning_dropout_prob=0 "
+                    "for the strict residual falsifier")
+            if self.connector_width <= 0 or self.connector_layers <= 0:
+                raise ValueError("residual connector width and layers must be positive")
+        if self.residual_strength < 0:
+            raise ValueError("residual_strength must be non-negative")
+        if min(self.residual_prefix_weight, self.residual_norm_weight,
+               self.residual_penalty_floor) < 0:
+            raise ValueError("residual penalty weights must be non-negative")
+        if self.residual_checkpoint_every_opt_steps < 0:
+            raise ValueError("residual_checkpoint_every_opt_steps must be non-negative")
         camera_dropouts = (
             self.camera_metadata_dropout_prob_ella,
             self.camera_metadata_dropout_prob_sara,
@@ -351,6 +394,43 @@ class TrainConfig:
                 not isinstance(source, str) or not source.strip()
                 for source in self.data_sources):
             raise ValueError("data_sources must contain at least one location")
+        for field_name, sources in (
+            ("pretrain_prompt_sources", self.pretrain_prompt_sources),
+            ("pretrain_validation_prompt_sources",
+             self.pretrain_validation_prompt_sources),
+        ):
+            if any(not isinstance(source, str) or not source.strip()
+                   for source in sources):
+                raise ValueError(f"{field_name} must contain valid paths")
+        if self.pretrain_batch_size < 0:
+            raise ValueError("pretrain_batch_size must be non-negative")
+        if self.pretrain_max_gemma_len < 0:
+            raise ValueError("pretrain_max_gemma_len must be non-negative")
+        if (self.pretrain_text_only_fast
+                and not self.pretrain_prompt_sources):
+            raise ValueError(
+                "pretrain_text_only_fast requires pretrain_prompt_sources")
+        if self.pretrain_validation_samples_per_source <= 0:
+            raise ValueError(
+                "pretrain_validation_samples_per_source must be positive")
+        if self.pretrain_validation_every_opt_steps < 0:
+            raise ValueError(
+                "pretrain_validation_every_opt_steps must be non-negative")
+        if self.pretrain_timestep_sampling not in ("zero", "uniform"):
+            raise ValueError(
+                "pretrain_timestep_sampling must be 'zero' or 'uniform'")
+        if self.pretrain_num_train_timesteps <= 0:
+            raise ValueError("pretrain_num_train_timesteps must be positive")
+        if not self.pretrain_validation_timesteps:
+            raise ValueError("pretrain_validation_timesteps must not be empty")
+        if any(
+                not isinstance(timestep, int)
+                or timestep < 0
+                or timestep >= self.pretrain_num_train_timesteps
+                for timestep in self.pretrain_validation_timesteps):
+            raise ValueError(
+                "pretrain_validation_timesteps must contain integers in "
+                "[0, pretrain_num_train_timesteps)")
         if self.max_image_dimension <= 0:
             raise ValueError("max_image_dimension must be positive")
         for bucket in self.aspect_ratio_buckets:
@@ -379,6 +459,18 @@ class TrainConfig:
         print(f"UNet conditioning tokens: {self.context_tokens} anchor={self.clip_anchor_tokens}")
         print(f"Connector: {self.connector_type}")
         print(f"CLIP pretrain: {self.run_clip_alignment_pretrain} (max_steps={self.pretrain_max_opt_steps})")
+        if self.pretrain_prompt_sources:
+            print(
+                "CLIP pretrain prompt-only: "
+                f"sources={self.pretrain_prompt_sources} "
+                f"batch={self.pretrain_batch_size or self.train_batch_size} "
+                f"gemma_len={self.pretrain_max_gemma_len or self.max_gemma_len} "
+                f"fast={self.pretrain_text_only_fast} "
+                f"timesteps={self.pretrain_timestep_sampling}/"
+                f"{self.pretrain_num_train_timesteps} "
+                f"validation={self.pretrain_validation_prompt_sources} "
+                f"validation_timesteps={self.pretrain_validation_timesteps}"
+            )
         print(f"ELLA training: steps≤{self.ella_max_opt_steps}")
         print(f"SaRA: {self.run_sara_phase}")
         if self.run_sara_phase:

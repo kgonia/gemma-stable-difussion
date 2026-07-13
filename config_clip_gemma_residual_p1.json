@@ -1,0 +1,33 @@
+{
+  "experiment_stage": "stage2_long_context_no_sara",
+  "run_mode": "full_train",
+  "run_clip_alignment_pretrain": false,
+  "connector_type": "clip_gemma_residual_tsc",
+  "connector_width": 640,
+  "connector_layers": 3,
+  "connector_heads": 8,
+  "connector_ff_mult": 4,
+  "connector_time_embed_dim": 640,
+  "gemma_layer_mix_count": 4,
+  "max_gemma_len": 336,
+  "conditioning_dropout_prob": 0.0,
+  "residual_strength": 1.0,
+  "residual_prefix_weight": 0.1,
+  "residual_norm_weight": 0.01,
+  "residual_penalty_floor": 0.001,
+  "residual_checkpoint_every_opt_steps": 250,
+  "train_batch_size": 1,
+  "ella_lr": 3e-05,
+  "max_samples_ella": 9293,
+  "ella_epochs": 1,
+  "ella_max_opt_steps": 9293,
+  "validation_every_opt_steps": 250,
+  "generation_grid_every_opt_steps": 500,
+  "data_sources": [
+    "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/production/unsplash_lite_gemma_captions_10000.parquet"
+  ],
+  "caption_mix_short": 0.0,
+  "caption_mix_medium": 0.0,
+  "caption_mix_long": 1.0,
+  "output_dir": "./output_clip_gemma_residual_p1"
+}

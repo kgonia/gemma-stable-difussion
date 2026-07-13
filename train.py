@@ -50,6 +50,10 @@ from pure_ella.camera import (
     make_camera_condition,
 )
 from pure_ella.dataset import make_streaming_dataloader
+from pure_ella.prompts import (
+    make_prompt_dataloader,
+    sample_validation_prompts,
+)
 from pure_ella.sara import (
     build_sara_attn2_kv_sparse_masks,
     install_sara_gradient_masks,
@@ -175,6 +179,8 @@ class DiffusionStepOutput:
     loss_teacher: torch.Tensor
     loss_delta: torch.Tensor
     loss_anchor: torch.Tensor
+    loss_prefix: torch.Tensor
+    loss_norm: torch.Tensor
     clip_scaffold_scale: float
 
     def scalars(self, step: int) -> dict:
@@ -185,6 +191,8 @@ class DiffusionStepOutput:
             "loss_teacher": float(self.loss_teacher.detach().item()),
             "loss_delta": float(self.loss_delta.detach().item()),
             "loss_anchor": float(self.loss_anchor.detach().item()),
+            "loss_prefix": float(self.loss_prefix.detach().item()),
+            "loss_norm": float(self.loss_norm.detach().item()),
             "clip_scaffold_scale": self.clip_scaffold_scale,
         }
 
@@ -381,6 +389,11 @@ def load_stylejourney(state: TrainingState):
         pipe = StableDiffusionPipeline.from_single_file(
             sd_path, torch_dtype=state.unet_dtype,
             token=os.environ.get("HF_TOKEN"),
+            text_encoder=None,
+            tokenizer=None,
+            safety_checker=None,
+            feature_extractor=None,
+            requires_safety_checker=False,
         )
         state.unet = pipe.unet.to(state.device)
         state.vae = pipe.vae.to(state.device)
@@ -446,7 +459,13 @@ def build_ella_connector(state: TrainingState):
             device=state.device, dtype=state.unet_dtype)
         m = torch.ones(2, 32, device=state.device, dtype=torch.long)
         t = torch.tensor([10, 500], device=state.device).long()
-        y = state.connector(g, t, m)
+        if is_residual_connector(cfg):
+            clip = torch.randn(2, cfg.context_tokens, 768,
+                               device=state.device, dtype=state.unet_dtype)
+            y = state.connector(clip, g, t, m)
+            assert torch.equal(y, torch.zeros_like(y)), "residual must start at zero"
+        else:
+            y = state.connector(g, t, m)
         assert y.shape == (2, cfg.context_tokens, 768), y.shape
         assert torch.isfinite(y).all()
 
@@ -505,6 +524,48 @@ def _validate_camera_checkpoint_schema(
         )
 
 
+def connector_checkpoint_schema(state: TrainingState) -> dict:
+    """Versioned architecture identity; prevents silent pure/residual mixes."""
+    cfg = state.cfg
+    return {
+        "version": 1,
+        "connector_type": cfg.connector_type,
+        "context_tokens": cfg.context_tokens,
+        "clip_anchor_tokens": cfg.clip_anchor_tokens,
+        "connector_width": cfg.connector_width,
+        "gemma_layer_mix_count": cfg.gemma_layer_mix_count,
+        "residual": is_residual_connector(cfg),
+    }
+
+
+def validate_connector_checkpoint_schema(checkpoint: dict, state: TrainingState,
+                                         source: str) -> None:
+    actual = checkpoint.get("connector_schema")
+    expected = connector_checkpoint_schema(state)
+    if actual is None:
+        if is_residual_connector(state.cfg):
+            raise RuntimeError(f"Residual checkpoint {source} has no connector_schema")
+        return  # Legacy pure checkpoints remain loadable.
+    if actual != expected:
+        raise RuntimeError(
+            f"Connector checkpoint schema mismatch for {source}: "
+            f"expected {expected}, got {actual}")
+
+
+def save_residual_step_checkpoint(state: TrainingState, step: int) -> str:
+    """Save frequent, schema-tagged residual weights for drift recovery."""
+    path = os.path.join(state.cfg.output_dir, f"residual_connector_step_{step:06d}.pt")
+    torch.save({
+        "connector_schema": connector_checkpoint_schema(state),
+        "connector_state_dict": {k: v.detach().cpu()
+                                  for k, v in state.connector.state_dict().items()},
+        "config": state.cfg.to_dict(),
+        "stage": "clip_gemma_residual_frozen_unet",
+        "optimizer_step": step,
+    }, path)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Encoding helpers
 # ---------------------------------------------------------------------------
@@ -518,7 +579,7 @@ def _as_prompt_list(x):
 
 def make_encode_gemma(state: TrainingState):
     @torch.no_grad()
-    def encode_gemma(prompts, max_length=None):
+    def encode_gemma(prompts, max_length=None, pad_to_max_length=True):
         max_length = max_length or state.cfg.max_gemma_len
         prompts = _as_prompt_list(prompts)
         encoded = state.gemma_tokenizer(
@@ -555,7 +616,9 @@ def make_encode_gemma(state: TrainingState):
                 for name, sequences in encoded.items()
             }
         toks = state.gemma_tokenizer.pad(
-            encoded, padding="max_length", max_length=max_length,
+            encoded,
+            padding=("max_length" if pad_to_max_length else "longest"),
+            max_length=max_length,
             return_tensors="pt",
         ).to(state.gemma_model.device)
         out = state.gemma_model(**toks, output_hidden_states=True,
@@ -592,6 +655,64 @@ def make_encode_clip(state: TrainingState):
     return encode_clip
 
 
+def is_residual_connector(cfg: TrainConfig) -> bool:
+    return cfg.connector_type == "clip_gemma_residual_tsc"
+
+
+def prompt_exceeds_clip_window(state: TrainingState, prompts) -> torch.Tensor:
+    """Return the non-truncating CLIP length predicate used by the hard bypass."""
+    prompts = _as_prompt_list(prompts)
+    encoded = state.clip_tokenizer(prompts, padding=False, truncation=False)
+    lengths = [len(ids) for ids in encoded["input_ids"]]
+    return torch.tensor(lengths, device=state.device) > state.cfg.clip_anchor_tokens
+
+
+def _clip_visible_prefixes(state: TrainingState, prompts) -> list[str]:
+    """Decode the same CLIP-visible token prefix used for the prefix-null loss."""
+    encoded = state.clip_tokenizer(_as_prompt_list(prompts), padding=False,
+                                   truncation=False)
+    return [state.clip_tokenizer.decode(ids[:state.cfg.clip_anchor_tokens],
+                                        skip_special_tokens=True)
+            for ids in encoded["input_ids"]]
+
+
+def residual_context_for_captions(state: TrainingState, captions, timesteps):
+    """Build residual conditioning with a control-flow (not masked) short bypass.
+
+    Returns context plus the full/prefix deltas for regularization.  Gemma and
+    the connector are never invoked for an all-short batch.
+    """
+    clip_context, _ = state.encode_clip(captions)
+    context = clip_context.clone()
+    long_mask = prompt_exceeds_clip_window(state, captions)
+    zero = context.new_zeros(())
+    if not bool(long_mask.any()):
+        return context, zero, zero, long_mask
+    idx = long_mask.nonzero(as_tuple=True)[0]
+    long_captions = [captions[i] for i in idx.tolist()]
+    gemma_h, gemma_mask = state.encode_gemma(long_captions)
+    delta_full = state.connector(
+        clip_context[idx].to(dtype=state.unet_dtype),
+        gemma_h.to(dtype=state.unet_dtype), timesteps[idx], gemma_mask,
+        context_tokens=state.cfg.context_tokens)
+    context[idx] = clip_context[idx] + state.cfg.residual_strength * delta_full
+
+    # The prefix control is only needed for loss construction.  It intentionally
+    # has the same CLIP queries and timestep as the full prompt.
+    prefix_prompts = _clip_visible_prefixes(state, long_captions)
+    prefix_h, prefix_mask = state.encode_gemma(prefix_prompts)
+    delta_prefix = state.connector(
+        clip_context[idx].to(dtype=state.unet_dtype),
+        prefix_h.to(dtype=state.unet_dtype), timesteps[idx], prefix_mask,
+        context_tokens=state.cfg.context_tokens)
+    return context, delta_full, delta_prefix, long_mask
+
+
+def normalized_residual_square(delta: torch.Tensor, clip_context: torch.Tensor) -> torch.Tensor:
+    """Residual energy normalized to the native CLIP RMS scale."""
+    return delta.float().square().mean() / clip_context.float().square().mean().clamp_min(1e-8)
+
+
 # ---------------------------------------------------------------------------
 # VRAM logging
 # ---------------------------------------------------------------------------
@@ -611,6 +732,99 @@ def log_vram(label: str, step: int, state: TrainingState):
     }, wandb=state.wandb)
 
 
+@torch.no_grad()
+def evaluate_clip_pretrain(
+    state: TrainingState,
+    clip_geom: ClipGeometryLoss,
+    validation_sets: dict[str, list[str]],
+    step: int,
+) -> dict[str, float]:
+    """Evaluate CLIP geometry on fixed prompt sets without image decoding."""
+    if not validation_sets:
+        return {}
+    was_training = state.connector.training
+    state.connector.eval()
+    batch_size = state.cfg.pretrain_batch_size or state.cfg.train_batch_size
+    aggregate = {
+        name: 0.0
+        for name in ("loss", "mse", "cos", "norm", "ctr", "pooled_cos",
+                     "norm_ratio")
+    }
+    aggregate_count = 0
+    result: dict[str, float] = {}
+    validation_timesteps = state.cfg.pretrain_validation_timesteps
+    timestep_sums = {
+        timestep: {name: 0.0 for name in aggregate}
+        for timestep in validation_timesteps
+    }
+    timestep_counts = {timestep: 0 for timestep in validation_timesteps}
+    gemma_max_length = (
+        state.cfg.pretrain_max_gemma_len or state.cfg.max_gemma_len)
+    for source_name, raw_prompts in validation_sets.items():
+        source_sums = {name: 0.0 for name in aggregate}
+        source_count = 0
+        for offset in range(0, len(raw_prompts), batch_size):
+            prompt_batch = clip_visible_prompts(
+                state, raw_prompts[offset:offset + batch_size])
+            gh, gm = state.encode_gemma(
+                prompt_batch, max_length=gemma_max_length,
+                pad_to_max_length=False)
+            with model_autocast(state):
+                ch, cm = state.encode_clip(prompt_batch)
+            token_mask = torch.ones_like(cm)
+            for timestep in validation_timesteps:
+                timesteps = torch.full(
+                    (len(prompt_batch),), timestep,
+                    device=state.device, dtype=torch.long)
+                with model_autocast(state):
+                    prediction = state.connector(
+                        gh.to(dtype=state.unet_dtype), timesteps, gm,
+                        context_tokens=state.cfg.clip_anchor_tokens,
+                    )
+                loss_values = clip_geom(
+                    prediction, ch, token_mask, pool_mask=cm)
+                count = len(prompt_batch)
+                values = {
+                    "loss": loss_values["total"].item(),
+                    "mse": loss_values["mse"].item(),
+                    "cos": loss_values["cos"].item(),
+                    "norm": loss_values["norm"].item(),
+                    "ctr": loss_values["ctr"].item(),
+                    "pooled_cos": loss_values["pooled_cos"].item(),
+                    "norm_ratio": loss_values["norm_ratio"].item(),
+                }
+                for name, value in values.items():
+                    weighted = value * count
+                    source_sums[name] += weighted
+                    aggregate[name] += weighted
+                    timestep_sums[timestep][name] += weighted
+                source_count += count
+                aggregate_count += count
+                timestep_counts[timestep] += count
+        for name, value in source_sums.items():
+            result[f"{source_name}_{name}"] = value / source_count
+
+    for name, value in aggregate.items():
+        result[name] = value / aggregate_count
+    for timestep, sums in timestep_sums.items():
+        for name, value in sums.items():
+            result[f"t{timestep:04d}_{name}"] = (
+                value / timestep_counts[timestep])
+    payload = {
+        "pretrain_val/step": step,
+        **{f"pretrain_val/{name}": value for name, value in result.items()},
+    }
+    safe_wandb_log(payload, wandb=state.wandb)
+    print(
+        f"pretrain validation step {step}: loss={result['loss']:.5f} "
+        f"mse={result['mse']:.5f} cos={result['cos']:.5f} "
+        f"pooled_cos={result['pooled_cos']:.5f} "
+        f"norm_ratio={result['norm_ratio']:.3f}"
+    )
+    state.connector.train(was_training)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Phase 0: CLIP alignment pretrain
 # ---------------------------------------------------------------------------
@@ -624,8 +838,12 @@ def run_clip_pretrain(state: TrainingState):
     assert state.clip_model is not None, "CLIP required for pretrain"
     clip_geom = ClipGeometryLoss()
 
-    for p in state.unet.parameters(): p.requires_grad_(False)
-    for p in state.vae.parameters(): p.requires_grad_(False)
+    if state.unet is not None:
+        for p in state.unet.parameters():
+            p.requires_grad_(False)
+    if state.vae is not None:
+        for p in state.vae.parameters():
+            p.requires_grad_(False)
     for p in state.gemma_model.parameters(): p.requires_grad_(False)
     for p in state.clip_model.parameters(): p.requires_grad_(False)
     for p in state.connector.parameters(): p.requires_grad_(True)
@@ -636,16 +854,21 @@ def run_clip_pretrain(state: TrainingState):
     state.connector.train()
     state.gemma_model.eval()
     state.clip_model.eval()
-    state.unet.eval()
-    state.vae.eval()
+    if state.unet is not None:
+        state.unet.eval()
+    if state.vae is not None:
+        state.vae.eval()
 
+    pretrain_batch_size = cfg.pretrain_batch_size or cfg.train_batch_size
+    prompt_only = bool(cfg.pretrain_prompt_sources)
+    gemma_max_length = cfg.pretrain_max_gemma_len or cfg.max_gemma_len
     plan = estimate_steps(
         cfg.max_samples_pretrain,
-        cfg.train_batch_size,
+        pretrain_batch_size,
         cfg.pretrain_epochs,
         cfg.pretrain_max_opt_steps,
-        drop_last=cfg.drop_last_bucket_batches,
-        bucket_count=len(cfg.aspect_ratio_buckets),
+        drop_last=(False if prompt_only else cfg.drop_last_bucket_batches),
+        bucket_count=(1 if prompt_only else len(cfg.aspect_ratio_buckets)),
     )
     plan.name = "clip_pretrain"
     plan.print()
@@ -657,43 +880,94 @@ def run_clip_pretrain(state: TrainingState):
     opt_step = 0
     best = None
     last_pretrain = {}
+    validation_sets = (
+        sample_validation_prompts(
+            cfg.pretrain_validation_prompt_sources,
+            cfg.pretrain_validation_samples_per_source,
+            cfg.base_seed + 20_000,
+        )
+        if cfg.pretrain_validation_prompt_sources else {}
+    )
+    if validation_sets:
+        print(
+            "Phase 0 held-out prompt sets: "
+            + ", ".join(
+                f"{name}={len(prompts)}"
+                for name, prompts in validation_sets.items()
+            )
+        )
+        evaluate_clip_pretrain(state, clip_geom, validation_sets, step=0)
+    best_validation_loss = float("inf")
+    best_validation_step = 0
+    best_validation_metrics: dict[str, float] = {}
+    best_validation_state = None
+    last_validation_step = 0
     stop = False
     t0 = time.time()
 
     for epoch in range(cfg.pretrain_epochs):
-        dl = make_streaming_dataloader(
-            cfg.data_sources, phase=10, epoch=epoch,
-            max_samples=cfg.max_samples_pretrain,
-            batch_size=cfg.train_batch_size,
-            shuffle=cfg.shuffle_streaming,
-            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
-            buckets=cfg.aspect_ratio_buckets,
-            drop_last=cfg.drop_last_bucket_batches,
-            max_image_dimension=cfg.max_image_dimension)
+        if prompt_only:
+            dl = make_prompt_dataloader(
+                cfg.pretrain_prompt_sources,
+                epoch=epoch,
+                max_samples=cfg.max_samples_pretrain,
+                batch_size=pretrain_batch_size,
+                shuffle=cfg.shuffle_streaming,
+                shuffle_buffer=cfg.shuffle_buffer,
+                base_seed=cfg.base_seed,
+            )
+        else:
+            dl = make_streaming_dataloader(
+                cfg.data_sources, phase=10, epoch=epoch,
+                max_samples=cfg.max_samples_pretrain,
+                batch_size=pretrain_batch_size,
+                shuffle=cfg.shuffle_streaming,
+                shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
+                buckets=cfg.aspect_ratio_buckets,
+                drop_last=cfg.drop_last_bucket_batches,
+                max_image_dimension=cfg.max_image_dimension)
         progress = tqdm(dl, desc=f"CLIP-pretrain {epoch+1}/{cfg.pretrain_epochs}")
         for batch in progress:
-            long_captions = _as_prompt_list(batch["caption"])
-            supplied_short = _as_prompt_list(batch.get(
-                "caption_short", [""] * len(long_captions)))
-            phase0_sources = [short or long for short, long in zip(
-                supplied_short, long_captions)]
+            if prompt_only:
+                phase0_sources = _as_prompt_list(batch)
+                supplied_short = phase0_sources
+            else:
+                long_captions = _as_prompt_list(batch["caption"])
+                supplied_short = _as_prompt_list(batch.get(
+                    "caption_short", [""] * len(long_captions)))
+                phase0_sources = [short or long for short, long in zip(
+                    supplied_short, long_captions)]
             captions = clip_visible_prompts(state, phase0_sources)
             if epoch == 0 and opt_step == 0:
-                supplied = sum(bool(caption) for caption in supplied_short)
-                print(
-                    f"Phase 0 short captions supplied={supplied}/{len(captions)}; "
-                    "all inputs are reduced to the exact CLIP-visible decoded prefix"
-                )
+                if prompt_only:
+                    print(
+                        f"Phase 0 prompt-only batch={len(captions)}; all inputs "
+                        "are reduced to the exact CLIP-visible decoded prefix"
+                    )
+                else:
+                    supplied = sum(bool(caption) for caption in supplied_short)
+                    print(
+                        f"Phase 0 short captions supplied={supplied}/{len(captions)}; "
+                        "all inputs are reduced to the exact CLIP-visible decoded prefix"
+                    )
             with torch.no_grad():
-                gh, gm = state.encode_gemma(captions)
+                gh, gm = state.encode_gemma(
+                    captions, max_length=gemma_max_length,
+                    pad_to_max_length=False)
                 with model_autocast(state):
                     ch, cm = state.encode_clip(captions)
-            t = torch.zeros(len(captions), device=state.device, dtype=torch.long)
+            if cfg.pretrain_timestep_sampling == "uniform":
+                t = torch.randint(
+                    cfg.pretrain_num_train_timesteps,
+                    (len(captions),), device=state.device, dtype=torch.long)
+            else:
+                t = torch.zeros(
+                    len(captions), device=state.device, dtype=torch.long)
             with model_autocast(state):
                 pred = state.connector(
                     gh.to(dtype=state.unet_dtype), t, gm,
                     context_tokens=cfg.clip_anchor_tokens)
-            ld = clip_geom(pred, ch, cm)
+            ld = clip_geom(pred, ch, torch.ones_like(cm), pool_mask=cm)
             loss = ld["total"]
             if not torch.isfinite(loss):
                 raise RuntimeError("CLIP alignment loss NaN/Inf")
@@ -705,6 +979,7 @@ def run_clip_pretrain(state: TrainingState):
                 "cos": ld["cos"].item(),
                 "pooled_cos": ld["pooled_cos"].item(),
                 "norm_ratio": ld["norm_ratio"].item(),
+                "timestep_mean": t.float().mean().item(),
             }
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -728,7 +1003,23 @@ def run_clip_pretrain(state: TrainingState):
                     "pretrain/cos": ld["cos"].item(),
                     "pretrain/pooled_cos": ld["pooled_cos"].item(),
                     "pretrain/norm_ratio": ld["norm_ratio"].item(),
+                    "pretrain/timestep_mean": t.float().mean().item(),
                 }, wandb=state.wandb)
+
+            validation_interval = cfg.pretrain_validation_every_opt_steps
+            if (validation_sets and validation_interval > 0
+                    and opt_step % validation_interval == 0):
+                validation_metrics = evaluate_clip_pretrain(
+                    state, clip_geom, validation_sets, step=opt_step)
+                last_validation_step = opt_step
+                if validation_metrics["loss"] < best_validation_loss:
+                    best_validation_loss = validation_metrics["loss"]
+                    best_validation_step = opt_step
+                    best_validation_metrics = validation_metrics
+                    best_validation_state = {
+                        name: parameter.detach().cpu().clone()
+                        for name, parameter in state.connector.state_dict().items()
+                    }
 
             progress.set_postfix(
                 {"loss": f"{loss.item():.4f}", "best": f"{best:.4f}"})
@@ -740,7 +1031,20 @@ def run_clip_pretrain(state: TrainingState):
         if stop:
             break
 
+    if validation_sets and last_validation_step != opt_step:
+        validation_metrics = evaluate_clip_pretrain(
+            state, clip_geom, validation_sets, step=opt_step)
+        if validation_metrics["loss"] < best_validation_loss:
+            best_validation_loss = validation_metrics["loss"]
+            best_validation_step = opt_step
+            best_validation_metrics = validation_metrics
+            best_validation_state = {
+                name: parameter.detach().cpu().clone()
+                for name, parameter in state.connector.state_dict().items()
+            }
+
     elapsed_min = (time.time() - t0) / 60
+    prompt_exposures = opt_step * pretrain_batch_size
     log_vram("clip_pretrain_end", opt_step, state)
     pretrain_summary = {
         "steps": opt_step,
@@ -751,7 +1055,21 @@ def run_clip_pretrain(state: TrainingState):
         "final_cos": last_pretrain.get("cos", float("nan")),
         "final_pooled_cos": last_pretrain.get("pooled_cos", float("nan")),
         "final_norm_ratio": last_pretrain.get("norm_ratio", float("nan")),
+        "connector_params": sum(
+            parameter.numel() for parameter in state.connector.parameters()),
+        "prompt_only": int(prompt_only),
+        "prompt_exposures": prompt_exposures,
+        "prompts_per_second": (
+            prompt_exposures / max(elapsed_min * 60.0, 1e-6)),
     }
+    if best_validation_metrics:
+        pretrain_summary.update({
+            "best_validation_step": best_validation_step,
+            **{
+                f"best_validation_{name}": value
+                for name, value in best_validation_metrics.items()
+            },
+        })
     remember_final_summary(
         "clip_pretrain", pretrain_summary,
         wandb_prefix="final/clip_pretrain", wandb=state.wandb)
@@ -762,6 +1080,7 @@ def run_clip_pretrain(state: TrainingState):
     ckpt_path = f"{cfg.output_dir}/ella_connector_clip_pretrain.pt"
     os.makedirs(cfg.output_dir, exist_ok=True)
     torch.save({
+        "connector_schema": connector_checkpoint_schema(state),
         "connector_state_dict": {k: v.detach().cpu()
                                  for k, v in state.connector.state_dict().items()},
         "camera_conditioner_state_dict": (
@@ -773,12 +1092,35 @@ def run_clip_pretrain(state: TrainingState):
         "config": cfg.to_dict(),
         "stage": "clip_alignment_pretrain",
     }, ckpt_path)
+    if best_validation_state is not None:
+        best_ckpt_path = (
+            f"{cfg.output_dir}/ella_connector_clip_pretrain_best.pt")
+        torch.save({
+            "connector_state_dict": best_validation_state,
+            "camera_conditioner_state_dict": None,
+            "camera_condition_schema": _camera_schema(state),
+            "config": cfg.to_dict(),
+            "stage": "clip_alignment_pretrain_best_validation",
+            "validation_step": best_validation_step,
+            "validation_metrics": best_validation_metrics,
+        }, best_ckpt_path)
+        print(
+            f"Best held-out Phase 0 checkpoint: {best_ckpt_path} "
+            f"step={best_validation_step} "
+            f"loss={best_validation_loss:.5f}"
+        )
 
-    post_sens = connector_prompt_sensitivity(
-        cfg.val_prompts, state, label="post_clip_pretrain", wandb=state.wandb)
-    post_delta = teacher_student_delta_alignment(
-        cfg.val_prompts[0], state, label="post_clip_pretrain",
-        wandb=state.wandb)
+    if state.unet is None:
+        print("Fast prompt-only Phase 0: U-Net post-diagnostics skipped")
+        post_sens = float("nan")
+        post_delta = {}
+    else:
+        post_sens = connector_prompt_sensitivity(
+            cfg.val_prompts, state, label="post_clip_pretrain",
+            wandb=state.wandb)
+        post_delta = teacher_student_delta_alignment(
+            cfg.val_prompts[0], state, label="post_clip_pretrain",
+            wandb=state.wandb)
     pretrain_summary.update({
         "post_clip_prompt_sensitivity": post_sens,
         "post_clip_delta_cos": (post_delta.get("delta_cos", float("nan"))
@@ -855,14 +1197,34 @@ def diffusion_training_step(
             device=state.device,
         ).long()
         noisy = state.scheduler.add_noise(latent, noise, timestep)
-        gemma_h, gemma_mask = state.encode_gemma(captions)
+        # Residual conditioning obtains Gemma states only for long prompts
+        # below.  This is essential: a zero mask would still run Gemma and can
+        # turn 0 * NaN into a non-identity short-prompt result.
+        if not is_residual_connector(cfg):
+            gemma_h, gemma_mask = state.encode_gemma(captions)
 
     loss_teacher = noise.new_tensor(0.0)
     loss_delta = noise.new_tensor(0.0)
     loss_anchor = noise.new_tensor(0.0)
+    loss_prefix = noise.new_tensor(0.0)
+    loss_norm = noise.new_tensor(0.0)
 
     with model_autocast(state):
-        if use_teacher_delta:
+        if is_residual_connector(cfg):
+            context, delta_full, delta_prefix, long_mask = residual_context_for_captions(
+                state, captions, timestep)
+            student_cond = camera_conditioned_unet(
+                state.unet, noisy, timestep,
+                encoder_hidden_states=context.to(dtype=state.unet_dtype),
+                camera_condition=camera_condition).sample
+            loss_diff = masked_mse(student_cond, noise, image_mask)
+            if bool(long_mask.any()):
+                clip_long = context[long_mask].detach() - (
+                    cfg.residual_strength * delta_full).detach()
+                loss_prefix = normalized_residual_square(delta_prefix, clip_long)
+                loss_norm = normalized_residual_square(delta_full, clip_long)
+            scaffold_scale = 1.0
+        elif use_teacher_delta:
             empty = [""] * len(captions)
             with torch.no_grad():
                 uncond_h, uncond_mask = state.encode_gemma(empty)
@@ -890,12 +1252,9 @@ def diffusion_training_step(
             loss_diff = masked_mse(student_cond, noise, image_mask)
 
             with torch.no_grad():
-                clip_h, clip_mask = state.encode_clip(captions)
-                uncond_clip_h, uncond_clip_mask = state.encode_clip(empty)
+                clip_h, _ = state.encode_clip(captions)
+                uncond_clip_h, _ = state.encode_clip(empty)
                 clip_pair = torch.cat([clip_h, uncond_clip_h], dim=0)
-                clip_mask_pair = torch.cat(
-                    [clip_mask, uncond_clip_mask], dim=0
-                )
                 teacher_pair = camera_conditioned_unet(
                     state.unet,
                     noisy_pair,
@@ -903,7 +1262,6 @@ def diffusion_training_step(
                     encoder_hidden_states=clip_pair.to(
                         dtype=state.unet_dtype
                     ),
-                    encoder_attention_mask=clip_mask_pair,
                     camera_condition=camera_pair,
                 ).sample.detach()
                 teacher_cond, teacher_uncond = teacher_pair.chunk(2)
@@ -941,12 +1299,15 @@ def diffusion_training_step(
             pred77 = context[:len(captions), :cfg.clip_anchor_tokens, :]
             loss_anchor = clip_geom(pred77, clip_h, clip_mask)["total"]
 
-        scaffold_scale = clip_scaffold_scale(cfg, opt_step)
+        scaffold_scale = (1.0 if is_residual_connector(cfg)
+                          else clip_scaffold_scale(cfg, opt_step))
         loss = (
             cfg.lambda_diffusion * loss_diff
             + scaffold_scale * cfg.lambda_teacher * loss_teacher
             + scaffold_scale * cfg.lambda_text_delta * loss_delta
             + scaffold_scale * semantic_anchor_weight * loss_anchor
+            + max(cfg.residual_penalty_floor, cfg.residual_prefix_weight) * loss_prefix
+            + max(cfg.residual_penalty_floor, cfg.residual_norm_weight) * loss_norm
         )
 
     if not torch.isfinite(loss):
@@ -957,6 +1318,8 @@ def diffusion_training_step(
         loss_teacher=loss_teacher,
         loss_delta=loss_delta,
         loss_anchor=loss_anchor,
+        loss_prefix=loss_prefix,
+        loss_norm=loss_norm,
         clip_scaffold_scale=scaffold_scale,
     )
 
@@ -978,7 +1341,8 @@ def _run_periodic_training_validation(
         f"diff={metrics['loss_diff']:.5f} "
         f"teacher={metrics['loss_teacher']:.5f} "
         f"delta={metrics['loss_delta']:.5f} "
-        f"anchor={metrics['loss_anchor']:.5f}"
+        f"anchor={metrics['loss_anchor']:.5f} "
+        f"prefix={metrics['loss_prefix']:.5f} norm={metrics['loss_norm']:.5f}"
     )
     label = f"{phase_name}_step_{opt_step:06d}"
     fixed_overfit_loss(state, label=label, wandb=state.wandb)
@@ -1073,6 +1437,11 @@ def run_diffusion_training_loop(
 
             opt_step += 1
             last_metrics = output.scalars(opt_step)
+            if (is_residual_connector(cfg)
+                    and cfg.residual_checkpoint_every_opt_steps
+                    and opt_step % cfg.residual_checkpoint_every_opt_steps == 0):
+                checkpoint_path = save_residual_step_checkpoint(state, opt_step)
+                print(f"Residual checkpoint saved: {checkpoint_path}")
             best = (
                 last_metrics["loss"]
                 if best is None
@@ -1087,6 +1456,8 @@ def run_diffusion_training_loop(
                     f"{spec.name}/loss_teacher": last_metrics["loss_teacher"],
                     f"{spec.name}/loss_delta": last_metrics["loss_delta"],
                     f"{spec.name}/loss_anchor": last_metrics["loss_anchor"],
+                    f"{spec.name}/loss_prefix": last_metrics["loss_prefix"],
+                    f"{spec.name}/loss_norm": last_metrics["loss_norm"],
                     f"{spec.name}/clip_scaffold_scale": last_metrics[
                         "clip_scaffold_scale"
                     ],
@@ -1121,6 +1492,8 @@ def run_diffusion_training_loop(
         ),
         "final_loss_delta": last_metrics.get("loss_delta", float("nan")),
         "final_loss_anchor": last_metrics.get("loss_anchor", float("nan")),
+        "final_loss_prefix": last_metrics.get("loss_prefix", float("nan")),
+        "final_loss_norm": last_metrics.get("loss_norm", float("nan")),
     }
     if cfg.camera_conditioning_enabled and state.camera_metadata_samples:
         for name, count in zip(
@@ -1236,6 +1609,7 @@ def run_ella_training(state: TrainingState):
     ckpt_path = f"{cfg.output_dir}/ella_connector_frozen_unet.pt"
     os.makedirs(cfg.output_dir, exist_ok=True)
     torch.save({
+        "connector_schema": connector_checkpoint_schema(state),
         "connector_state_dict": {k: v.detach().cpu()
                                  for k, v in state.connector.state_dict().items()},
         "camera_conditioner_state_dict": (
@@ -1543,6 +1917,7 @@ def run_save_artifacts(state: TrainingState):
     torch.save({
         "architecture": cfg.connector_type,
         "connector_type": cfg.connector_type,
+        "connector_schema": connector_checkpoint_schema(state),
         "connector_state_dict": {k: v.detach().cpu()
                                  for k, v in state.connector.state_dict().items()},
         "camera_conditioner_state_dict": (
@@ -1603,6 +1978,7 @@ def run_reload_proof(state: TrainingState):
     path = f"{cfg.output_dir}/pure_ella_connector_L{cfg.context_tokens}.pt"
     print("Reloading connector from:", path)
     ckpt = torch.load(path, map_location="cpu")
+    validate_connector_checkpoint_schema(ckpt, state, path)
     reloaded = build_connector(
         cfg.connector_type,
         gemma_dim=state.gemma_hidden_size,
@@ -1634,7 +2010,13 @@ def run_reload_proof(state: TrainingState):
     if sd_path.endswith(".safetensors"):
         pipe = StableDiffusionPipeline.from_single_file(
             sd_path, torch_dtype=state.unet_dtype,
-            token=os.environ.get("HF_TOKEN"))
+            token=os.environ.get("HF_TOKEN"),
+            text_encoder=None,
+            tokenizer=None,
+            safety_checker=None,
+            feature_extractor=None,
+            requires_safety_checker=False,
+        )
         reloaded_unet = pipe.unet.to(state.device).eval()
         pipe = None
     else:
@@ -1824,6 +2206,11 @@ def _load_connector_checkpoint(state: TrainingState, ckpt_path: str):
         return False
     strict = not state.cfg.init_connector_partial_warmstart
     try:
+        validate_connector_checkpoint_schema(ckpt, state, ckpt_path)
+    except RuntimeError as error:
+        print(error)
+        return False
+    try:
         missing, unexpected = state.connector.load_state_dict(sd, strict=strict)
     except RuntimeError as error:
         print(f"Checkpoint is incompatible with the configured connector: {error}")
@@ -1887,6 +2274,11 @@ def main():
         and cfg.run_training
         and cfg.pretrain_epochs > 0
     )
+    fast_text_only_pretrain = bool(
+        cfg.pretrain_text_only_fast
+        and pretrain_will_run
+        and phases_requested == {"pretrain"}
+    )
     p3_frozen_connector_training = (
         cfg.camera_conditioning_enabled
         and not cfg.camera_train_connector
@@ -1919,11 +2311,15 @@ def main():
         wandb.init(
             project=cfg.wandb_project,
             entity=cfg.wandb_entity or None,
-            name=f"pure-ella-{cfg.experiment_stage}-{cfg.run_mode}-L{cfg.context_tokens}",
+            name=(cfg.wandb_run_name or
+                  f"pure-ella-{cfg.experiment_stage}-{cfg.run_mode}-L{cfg.context_tokens}"),
+            group=cfg.wandb_group or None,
             config=cfg.to_dict(),
         )
         wandb.define_metric("pretrain/step")
         wandb.define_metric("pretrain/*", step_metric="pretrain/step")
+        wandb.define_metric("pretrain_val/step")
+        wandb.define_metric("pretrain_val/*", step_metric="pretrain_val/step")
         wandb.define_metric("ella/step")
         wandb.define_metric("ella/*", step_metric="ella/step")
         wandb.define_metric("sara/step")
@@ -1950,12 +2346,16 @@ def main():
     cfg.print_plan()
 
     load_gemma(state)
-    if (cfg.run_clip_alignment_pretrain or cfg.use_clip_teacher_delta
+    if (cfg.run_clip_alignment_pretrain or is_residual_connector(cfg)
+            or cfg.use_clip_teacher_delta
             or cfg.phase1_semantic_anchor_weight > 0
             or cfg.phase2_semantic_anchor_weight > 0):
         load_clip(state)
-    load_stylejourney(state)
-    build_camera_conditioner(state)
+    if fast_text_only_pretrain:
+        print("Fast prompt-only Phase 0: U-Net and VAE loading skipped")
+    else:
+        load_stylejourney(state)
+        build_camera_conditioner(state)
     state.encode_gemma = make_encode_gemma(state)
     if state.clip_model is not None:
         state.encode_clip = make_encode_clip(state)
@@ -2007,10 +2407,14 @@ def main():
     run_sara_training(state) if "sara" in phases_requested else print("sara SKIPPED")
     print_final_summary("sara_attn2_kv") if "sara" in phases_requested else None
 
-    run_validation_grids(state)
-    run_complex_prompt_checks(state)
-    run_save_artifacts(state)
-    run_reload_proof(state)
+    if fast_text_only_pretrain:
+        run_save_artifacts(state)
+        print("Fast prompt-only Phase 0: diffusion grids and reload proof skipped")
+    else:
+        run_validation_grids(state)
+        run_complex_prompt_checks(state)
+        run_save_artifacts(state)
+        run_reload_proof(state)
 
     if cfg.wandb_enabled:
         wandb.finish()

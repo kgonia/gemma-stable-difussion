@@ -136,20 +136,29 @@ class ClipGeometryLoss(nn.Module):
         m = ClipGeometryLoss._mask(mask, x).to(dtype=x.dtype)
         return (x * m).sum(dim=1) / m.sum(dim=1).clamp_min(1.0)
 
-    def forward(self, pred, target, mask):
+    def forward(self, pred, target, mask, pool_mask=None):
+        """Align token geometry while optionally pooling over another mask.
+
+        Phase 0 supervises all 77 CLIP states because SD1.5 consumes all of
+        them, but semantic pooling should still exclude padding positions.
+        Other callers retain the historical single-mask behavior.
+        """
         pred = pred[:, :target.shape[1], :].float()
         target = target.float()
+        pool_mask = mask if pool_mask is None else pool_mask
         m = self._mask(mask, pred)
+        token_weights = m.squeeze(-1).float()
+        token_count = token_weights.sum().clamp_min(1.0)
         pred_ln = F.layer_norm(pred, pred.shape[-1:])
         target_ln = F.layer_norm(target, target.shape[-1:])
         mse = ((pred_ln - target_ln).pow(2) * m).sum() / m.sum().clamp_min(1.0) / pred.shape[-1]
         cos = 1 - F.cosine_similarity(pred.float(), target.float(), dim=-1)
-        cos = (cos * m.squeeze(-1).float()).sum() / m.squeeze(-1).float().sum().clamp_min(1.0)
+        cos = (cos * token_weights).sum() / token_count
         pred_norm = pred.norm(dim=-1).clamp_min(1e-6)
         target_norm = target.norm(dim=-1).clamp_min(1e-6)
-        norm = (torch.log(pred_norm / target_norm).abs() * m.squeeze(-1).float()).sum() / m.squeeze(-1).float().sum().clamp_min(1.0)
-        pp = F.normalize(self._pooled(pred, mask), dim=-1)
-        tt = F.normalize(self._pooled(target, mask), dim=-1)
+        norm = (torch.log(pred_norm / target_norm).abs() * token_weights).sum() / token_count
+        pp = F.normalize(self._pooled(pred, pool_mask), dim=-1)
+        tt = F.normalize(self._pooled(target, pool_mask), dim=-1)
         logits = pp @ tt.t() / self.temp
         labels = torch.arange(pred.shape[0], device=pred.device)
         ctr = F.cross_entropy(logits, labels) if pred.shape[0] > 1 else pred.new_tensor(0.0)
@@ -162,7 +171,11 @@ class ClipGeometryLoss(nn.Module):
             "norm": norm,
             "ctr": ctr,
             "pooled_cos": pooled_cos,
-            "norm_ratio": pred_norm.mean() / target_norm.mean().clamp_min(1e-6),
+            "norm_ratio": (
+                (pred_norm * token_weights).sum() / token_count
+            ) / (
+                (target_norm * token_weights).sum() / token_count
+            ).clamp_min(1e-6),
         }
 
 
@@ -191,6 +204,9 @@ def generate_ella(
     steps: int = 30,
     guidance: float = 5.5,
     seed: int = 777,
+    negative_prompt: str = "",
+    height: int = 512,
+    width: int = 512,
     context_tokens: int = None,
     camera_condition: torch.Tensor = None,
 ) -> Image.Image:
@@ -198,7 +214,7 @@ def generate_ella(
     connector = state.connector
     unet = state.unet
     vae = state.vae
-    scheduler = state.scheduler
+    scheduler = state.inf_scheduler or state.scheduler
     device = state.device
     unet_dtype = state.unet_dtype
     encode_gemma = state.encode_gemma
@@ -207,19 +223,47 @@ def generate_ella(
     ctx = context_tokens or state.cfg.context_tokens
 
     gen = torch.Generator(device=device).manual_seed(seed)
-    latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
+    if height % 8 or width % 8:
+        raise ValueError("Generation height and width must be divisible by 8")
+    latent = torch.randn(
+        1, 4, height // 8, width // 8,
+        generator=gen, device=device, dtype=unet_dtype,
+    )
     scheduler.set_timesteps(steps, device=device)
+    latent = latent * scheduler.init_noise_sigma
     timesteps = scheduler.timesteps
 
-    gh, gm = encode_gemma([prompt])
-    ugh, ugm = encode_gemma([""])
+    residual = state.cfg.connector_type == "clip_gemma_residual_tsc"
+    if residual:
+        clip_cond, _ = state.encode_clip([prompt])
+        clip_uncond, _ = state.encode_clip([negative_prompt])
+        cond_long = len(state.clip_tokenizer([prompt], truncation=False)["input_ids"][0]) > state.cfg.clip_anchor_tokens
+        uncond_long = len(state.clip_tokenizer([negative_prompt], truncation=False)["input_ids"][0]) > state.cfg.clip_anchor_tokens
+        if cond_long:
+            gh, gm = encode_gemma([prompt])
+        if uncond_long:
+            ugh, ugm = encode_gemma([negative_prompt])
+    else:
+        gh, gm = encode_gemma([prompt])
+        ugh, ugm = encode_gemma([negative_prompt])
 
     for t in tqdm(timesteps, desc=f"gen:{prompt[:40]}"):
         t_batch = t.expand(2)
         latent_input = scheduler.scale_model_input(torch.cat([latent, latent], dim=0), t)
-        h_pair = torch.cat([gh, ugh], dim=0)
-        m_pair = torch.cat([gm, ugm], dim=0)
-        context = connector(h_pair.to(dtype=unet_dtype), t_batch.to(device), m_pair, context_tokens=ctx)
+        if residual:
+            context = torch.cat([clip_cond, clip_uncond], dim=0).clone()
+            if cond_long:
+                context[:1] += state.cfg.residual_strength * connector(
+                    clip_cond.to(dtype=unet_dtype), gh.to(dtype=unet_dtype),
+                    t_batch[:1].to(device), gm, context_tokens=ctx)
+            if uncond_long:
+                context[1:] += state.cfg.residual_strength * connector(
+                    clip_uncond.to(dtype=unet_dtype), ugh.to(dtype=unet_dtype),
+                    t_batch[1:].to(device), ugm, context_tokens=ctx)
+        else:
+            h_pair = torch.cat([gh, ugh], dim=0)
+            m_pair = torch.cat([gm, ugm], dim=0)
+            context = connector(h_pair.to(dtype=unet_dtype), t_batch.to(device), m_pair, context_tokens=ctx)
         camera_pair = None
         if camera_condition is not None:
             camera_single = camera_condition.reshape(1, -1)
@@ -230,7 +274,8 @@ def generate_ella(
         ).sample
         noise_cond, noise_uncond = noise_pred.chunk(2)
         noise_pred = noise_uncond + guidance * (noise_cond - noise_uncond)
-        latent = scheduler.step(noise_pred, t, latent).prev_sample
+        latent = scheduler.step(
+            noise_pred, t, latent, generator=gen).prev_sample
 
     latent = latent / vae.config.scaling_factor
     img = vae.decode(latent.to(dtype=vae.dtype)).sample
@@ -241,36 +286,45 @@ def generate_ella(
 
 
 @torch.no_grad()
-def generate_clip_teacher(prompt: str, state, steps: int = 30, guidance: float = 5.5, seed: int = 777) -> Image.Image:
+def generate_clip_teacher(
+    prompt: str, state, steps: int = 30, guidance: float = 5.5,
+    seed: int = 777, negative_prompt: str = "", height: int = 512,
+    width: int = 512,
+) -> Image.Image:
     """Generate an image using the CLIP teacher (for diagnostics)."""
     unet = state.unet
     vae = state.vae
-    scheduler = state.scheduler
+    scheduler = state.inf_scheduler or state.scheduler
     device = state.device
     unet_dtype = state.unet_dtype
     encode_clip = state.encode_clip
 
     gen = torch.Generator(device=device).manual_seed(seed)
-    latent = torch.randn(1, 4, 64, 64, generator=gen, device=device, dtype=unet_dtype)
+    if height % 8 or width % 8:
+        raise ValueError("Generation height and width must be divisible by 8")
+    latent = torch.randn(
+        1, 4, height // 8, width // 8,
+        generator=gen, device=device, dtype=unet_dtype,
+    )
     scheduler.set_timesteps(steps, device=device)
+    latent = latent * scheduler.init_noise_sigma
     timesteps = scheduler.timesteps
 
-    ch, cm = encode_clip([prompt])
-    uch, ucm = encode_clip([""])
+    ch, _ = encode_clip([prompt])
+    uch, _ = encode_clip([negative_prompt])
 
     for t in tqdm(timesteps, desc=f"clip:{prompt[:40]}"):
         t_batch = t.expand(2)
         latent_input = scheduler.scale_model_input(torch.cat([latent, latent], dim=0), t)
         h_pair = torch.cat([ch, uch], dim=0)
-        m_pair = torch.cat([cm, ucm], dim=0)
         noise_pred = camera_conditioned_unet(
             unet, latent_input, t_batch,
             encoder_hidden_states=h_pair.to(dtype=unet_dtype),
-            encoder_attention_mask=m_pair,
         ).sample
         noise_cond, noise_uncond = noise_pred.chunk(2)
         noise_pred = noise_uncond + guidance * (noise_cond - noise_uncond)
-        latent = scheduler.step(noise_pred, t, latent).prev_sample
+        latent = scheduler.step(
+            noise_pred, t, latent, generator=gen).prev_sample
 
     latent = latent / vae.config.scaling_factor
     img = vae.decode(latent.to(dtype=vae.dtype)).sample
@@ -345,14 +399,12 @@ def teacher_student_delta_alignment(prompt: str, state, timestep: int = 500, lab
     noisy_pair = torch.cat([noisy, noisy], dim=0)
     t_pair = torch.cat([t, t], dim=0)
 
-    ch, cm = encode_clip([prompt])
-    uch, ucm = encode_clip([""])
+    ch, _ = encode_clip([prompt])
+    uch, _ = encode_clip([""])
     clip_h = torch.cat([ch, uch], dim=0)
-    clip_m = torch.cat([cm, ucm], dim=0)
     teacher = camera_conditioned_unet(
         unet, noisy_pair, t_pair,
         encoder_hidden_states=clip_h.to(dtype=unet_dtype),
-        encoder_attention_mask=clip_m,
     ).sample.float()
     teacher_cond, teacher_uncond = teacher.chunk(2)
 
@@ -537,9 +589,12 @@ def _pil_grid(images: List[Image.Image], labels: List[str], cols: int = 3) -> Im
     return grid
 
 
-def save_validation_grid(images: List[Image.Image], labels: List[str], path: str, title: str = ""):
+def save_validation_grid(
+    images: List[Image.Image], labels: List[str], path: str,
+    title: str = "", cols: int = 3,
+):
     """Save a grid of generated images to disk."""
-    grid = _pil_grid(images, labels)
+    grid = _pil_grid(images, labels, cols=cols)
     grid.save(path)
     print(f"Validation grid saved: {path}")
 

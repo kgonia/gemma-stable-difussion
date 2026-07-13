@@ -6,6 +6,16 @@
 
 ## Implementation update (2026-07-13)
 
+The current P1 path is **CLIP-preserving Gemma residual conditioning**. Native
+CLIP remains the SD1.5 context and `clip_gemma_residual_tsc` learns a
+timestep-aware correction to its fixed 77 slots from long Gemma input. Its
+output projection starts exactly at zero, so the initial residual context is
+identical to CLIP. Prompts within CLIP's window take a control-flow bypass:
+Gemma and the connector are not run. Training uses prefix-null and
+CLIP-RMS-normalized residual-norm penalties. The pure `ella_tsc` replacement
+connector below is retained as a historical baseline, not the supported P1
+production direction.
+
 The supported P1 baseline is now **approximately 256-token Gemma captions
 (336-token safety window) -> 77 SD1.5 conditioning tokens**. `ella_tsc` is a
 fixed-query, timestep-aware resampler
@@ -29,6 +39,17 @@ driver. Model weight dtype and BF16 forward autocast are explicit configuration
 fields; supplied configs retain FP32 trainable weights and optimizer state while
 using BF16 CUDA activations. Bucket dimensions are validated as multiples of 64,
 and printed step plans include the upper bound from per-bucket tail batches.
+
+Phase 0 now matches the actual SD1.5 conditioning contract: all 77 CLIP hidden
+states, including the causally contextualized padding positions consumed by the
+U-Net, receive token-geometry supervision. The real-token mask is retained only
+for semantic pooling and contrastive alignment. ELLA-TSC is trained at uniformly
+sampled diffusion timesteps, and best-checkpoint validation covers fixed
+timesteps from 0 through 999. CLIP and connector U-Net diagnostics both use the
+same unmasked 77-token cross-attention path. The earlier masked, `t=0`-only
+objective left most output slots unconstrained and caused structured grain in
+Phase-0-only generations; it is retained only in historical checkpoints, not as
+a supported training mode.
 
 P3 camera conditioning is implemented behind `camera_conditioning_enabled`.
 It adds a Fourier/MLP class-embedding branch to the UNet timestep embedding,
@@ -78,8 +99,9 @@ guarantee and the ablation story: each pillar is exactly removable.
 
 ## Current state (what the code already does)
 
-- `train.py` runs three phases: Phase 0 short-prefix CLIP-geometry pretrain of
-  the connector (`run_clip_pretrain`), Phase 1 standard diffusion training with
+- `train.py` runs three phases: Phase 0 prompt-only CLIP-geometry pretrain of
+  the connector across the full 77-token U-Net contract and diffusion timestep
+  range (`run_clip_pretrain`), Phase 1 standard diffusion training with
   a frozen UNet and no suffix-divergence objective
   (`run_ella_training`), Phase 2 SaRA sparse `attn2.to_k/to_v` adaptation
   (`run_sara_training` — implemented, not a stub despite README wording).
@@ -137,7 +159,7 @@ GPU smoke runs; production-length metric validation remains part of P1/P2.
 
 ---
 
-## P1 — Long-input ELLA with a fixed SD1.5 contract (in flight — finish first)
+## P1 — Historical pure ELLA replacement baseline
 
 This is the baseline every later pillar is measured against.
 

@@ -11,3 +11,12 @@ sd-scripts/
 output/
 .env_wandb
 wandb/
+/data/phase0_prompts/
+/logs/phase0_connector_ablation/
+/logs/phase0_scaled/
+/logs/all_prompts_then_unsplash/
+/output_phase0_*/
+/output_p0_p1_*/
+/output_requested_ella_*/
+/output_unsplash_*/
+.idea/

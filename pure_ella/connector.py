@@ -1,10 +1,11 @@
 """
 Pure ELLA timestep-aware connector architectures.
 
-Supports three connector types:
+Supports four connector types:
 - ella_tsc: PureELLALongConnector (timestep-aware semantic connector)
 - recursive_y: RecursiveYConnector (y-only recursive refinement)
 - trm_yz: TRMYZConnector (y/z scratchpad recursive refinement)
+- clip_gemma_residual_tsc: CLIP-preserving Gemma residual connector
 """
 from __future__ import annotations
 import math
@@ -136,6 +137,66 @@ class TimestepAwareConnectorBlock(nn.Module):
         q = q + self.ff(self._modulate(
             self.ff_norm(q), ff_shift, ff_scale))
         return q
+
+
+class ClipGemmaResidualTSC(nn.Module):
+    """Timestep-aware Gemma correction to an existing CLIP context.
+
+    Unlike ``ella_tsc``, this module returns a *delta*, never a replacement
+    context.  Its final projection is exactly zero at initialization, making
+    ``clip_context + connector(...)`` bitwise equal to ``clip_context`` before
+    the first optimizer update.
+    """
+    def __init__(self, gemma_dim=640, width=640, context_tokens=77,
+                 anchor_tokens=77, layers=3, heads=8, ff_mult=4,
+                 dropout=0.0, time_embed_dim=640, extra_gate_init=-5.0,
+                 gemma_layer_mix_count=4, clip_dim=768):
+        super().__init__()
+        if context_tokens != anchor_tokens:
+            raise ValueError("clip_gemma_residual_tsc requires the 77-token CLIP contract")
+        self.context_tokens = int(context_tokens)
+        self.anchor_tokens = int(anchor_tokens)
+        self.clip_dim = int(clip_dim)
+        self.gemma_layer_mix_count = int(gemma_layer_mix_count)
+        self.layer_mix_logits = _make_layer_mix_logits(self.gemma_layer_mix_count)
+        self.clip_proj = nn.Linear(self.clip_dim, width)
+        self.gemma_proj = nn.Linear(gemma_dim, width)
+        self.gemma_norm = nn.LayerNorm(width)
+        self.time_mlp = nn.Sequential(
+            nn.Linear(320, time_embed_dim), nn.SiLU(), nn.Linear(time_embed_dim, width))
+        self.blocks = nn.ModuleList([
+            TimestepAwareConnectorBlock(width, heads, ff_mult, dropout)
+            for _ in range(layers)
+        ])
+        self.final_norm = nn.LayerNorm(width)
+        self.out = nn.Linear(width, self.clip_dim)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+        # Present for common reporting code; residual connectors deliberately
+        # have no learnable external gate.
+        self.extra_gate_logit = None
+
+    def _mix_gemma_layers(self, gemma_h):
+        return _mix_gemma_layers(gemma_h, self.layer_mix_logits, type(self).__name__)
+
+    def forward(self, clip_context, gemma_h, timesteps, gemma_mask=None,
+                context_tokens=None):
+        context_tokens = int(context_tokens or self.context_tokens)
+        if context_tokens != self.context_tokens:
+            raise ValueError(f"clip_gemma_residual_tsc has fixed length {self.context_tokens}")
+        if clip_context.ndim != 3 or clip_context.shape[1:] != (self.context_tokens, self.clip_dim):
+            raise ValueError(f"clip_context must have shape [B, {self.context_tokens}, {self.clip_dim}]")
+        gemma_h = self._mix_gemma_layers(gemma_h)
+        if gemma_h.shape[0] != clip_context.shape[0]:
+            raise ValueError("clip_context and Gemma batch sizes must match")
+        q = self.clip_proj(clip_context.to(dtype=self.clip_proj.weight.dtype))
+        kv = self.gemma_norm(self.gemma_proj(gemma_h.to(dtype=self.gemma_proj.weight.dtype)))
+        temb = self.time_mlp(PureELLALongConnector.timestep_embedding(
+            timesteps, self.time_mlp[0].in_features).to(device=q.device, dtype=q.dtype))
+        key_padding_mask = None if gemma_mask is None else ~gemma_mask.to(device=q.device, dtype=torch.bool)
+        for block in self.blocks:
+            q = block(q, kv, temb, key_padding_mask=key_padding_mask)
+        return self.out(self.final_norm(q))
 
 
 class PureELLALongConnector(nn.Module):
@@ -407,6 +468,8 @@ def build_connector(connector_type: str, **cfg) -> nn.Module:
     base_cfg = {k: v for k, v in cfg.items() if k in _BASE_CONNECTOR_KEYS}
     if connector_type == "ella_tsc":
         return PureELLALongConnector(**base_cfg)
+    if connector_type == "clip_gemma_residual_tsc":
+        return ClipGemmaResidualTSC(**base_cfg)
     if connector_type == "recursive_y":
         return RecursiveYConnector(
             **base_cfg,

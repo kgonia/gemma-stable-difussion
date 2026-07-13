@@ -15,6 +15,7 @@ from train import (
     diffusion_training_step,
     estimate_steps,
     make_encode_gemma,
+    residual_context_for_captions,
     resolve_autocast_dtype,
     resolve_model_weight_dtype,
     run_sara_training,
@@ -41,7 +42,13 @@ from pure_ella.dataset import (
     resize_full_frame,
     resize_long_edge,
 )
+from pure_ella.prompts import (
+    PromptTextDataset,
+    make_prompt_dataloader,
+    sample_validation_prompts,
+)
 from pure_ella.diagnostics import (
+    ClipGeometryLoss,
     guided_prediction,
     suffix_counterfactual_sensitivity,
     validate_suffix_counterfactual_token_boundaries,
@@ -57,6 +64,81 @@ from pure_ella.sara import (
 
 
 class ConnectorTrainingTests(unittest.TestCase):
+    def test_clip_geometry_can_supervise_all_tokens_and_pool_real_tokens(self):
+        target = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]])
+        prediction = target.clone()
+        prediction[:, 1:] = torch.tensor([[[4.0, -2.0], [-3.0, 5.0]]])
+        actual_token_mask = torch.tensor([[1, 0, 0]])
+        all_token_mask = torch.ones_like(actual_token_mask)
+        loss_fn = ClipGeometryLoss(w_ctr=0.0)
+
+        prefix_only = loss_fn(prediction, target, actual_token_mask)
+        full_contract = loss_fn(
+            prediction, target, all_token_mask,
+            pool_mask=actual_token_mask,
+        )
+
+        self.assertAlmostEqual(prefix_only["mse"].item(), 0.0, places=6)
+        self.assertGreater(full_contract["mse"].item(), 0.1)
+        self.assertAlmostEqual(
+            full_contract["pooled_cos"].item(), 1.0, places=6)
+
+    def test_phase0_timestep_configuration_is_validated(self):
+        with self.assertRaisesRegex(ValueError, "timestep_sampling"):
+            TrainConfig(pretrain_timestep_sampling="random")
+        with self.assertRaisesRegex(ValueError, "validation_timesteps"):
+            TrainConfig(
+                pretrain_num_train_timesteps=1000,
+                pretrain_validation_timesteps=[1000],
+            )
+
+    def test_fast_prompt_pretrain_requires_prompt_sources(self):
+        with self.assertRaisesRegex(ValueError, "pretrain_prompt_sources"):
+            TrainConfig(pretrain_text_only_fast=True)
+
+    def test_prompt_only_loader_is_deterministic_and_skips_blank_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prompts.txt"
+            path.write_text("one\n\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
+            kwargs = dict(
+                sources=[str(path)], max_samples=4, shuffle=True,
+                shuffle_buffer=3, seed=91,
+            )
+            first = list(PromptTextDataset(**kwargs))
+            second = list(PromptTextDataset(**kwargs))
+
+            self.assertEqual(first, second)
+            self.assertEqual(len(first), 4)
+            self.assertNotIn("", first)
+
+            batches = list(make_prompt_dataloader(
+                [str(path)], epoch=0, max_samples=5, batch_size=2,
+                shuffle=False, shuffle_buffer=2, base_seed=10,
+            ))
+            self.assertEqual(
+                batches, [["one", "two"], ["three", "four"], ["five"]])
+
+    def test_validation_prompt_sampling_is_fixed_per_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_path = Path(directory) / "first.txt"
+            second_path = Path(directory) / "second.txt"
+            first_path.write_text(
+                "".join(f"first {index}\n" for index in range(20)),
+                encoding="utf-8",
+            )
+            second_path.write_text(
+                "".join(f"second {index}\n" for index in range(20)),
+                encoding="utf-8",
+            )
+            sources = [str(first_path), str(second_path)]
+
+            sampled = sample_validation_prompts(sources, 5, seed=123)
+
+            self.assertEqual(sampled, sample_validation_prompts(
+                sources, 5, seed=123))
+            self.assertEqual(set(sampled), {"first", "second"})
+            self.assertTrue(all(len(prompts) == 5 for prompts in sampled.values()))
+
     def test_camera_metadata_extracts_nested_unsplash_exif(self):
         sample = {
             "upstream_json": json.dumps({
@@ -634,6 +716,38 @@ class ConnectorTrainingTests(unittest.TestCase):
         self.assertEqual(state.camera_metadata_samples, 1)
         self.assertEqual(state.camera_presence_counts, [0, 1, 0, 0])
 
+    def test_residual_short_prompt_bypass_is_exact_and_skips_gemma(self):
+        class Tokenizer:
+            def __call__(self, prompts, **_kwargs):
+                return {"input_ids": [[1, 2, 3] for _ in prompts]}
+
+        cfg = SimpleNamespace(
+            clip_anchor_tokens=4, context_tokens=4, residual_strength=1.0)
+        clip_context = torch.randn(2, 4, 768)
+        state = SimpleNamespace(
+            cfg=cfg, device=torch.device("cpu"), unet_dtype=torch.float32,
+            clip_tokenizer=Tokenizer(),
+            encode_clip=lambda _prompts: (clip_context, None),
+            encode_gemma=lambda _prompts: self.fail("Gemma must not run"),
+            connector=lambda *_args, **_kwargs: self.fail("connector must not run"),
+        )
+        context, full, prefix, long_mask = residual_context_for_captions(
+            state, ["short", "also short"], torch.tensor([2, 3]))
+        self.assertTrue(torch.equal(context, clip_context))
+        self.assertFalse(long_mask.any())
+        self.assertEqual(full.item(), 0.0)
+        self.assertEqual(prefix.item(), 0.0)
+
+    def test_residual_connector_starts_as_zero_delta(self):
+        connector = build_connector(
+            "clip_gemma_residual_tsc", gemma_dim=16, width=32,
+            context_tokens=77, anchor_tokens=77, layers=2, heads=4,
+            ff_mult=2, time_embed_dim=32, gemma_layer_mix_count=4)
+        delta = connector(
+            torch.randn(2, 77, 768), torch.randn(2, 4, 12, 16),
+            torch.tensor([10, 500]), torch.ones(2, 12, dtype=torch.long))
+        self.assertTrue(torch.equal(delta, torch.zeros_like(delta)))
+
     def test_tsc_reads_long_input_and_preserves_sd_token_contract(self):
         connector = build_connector(
             "ella_tsc",
@@ -829,13 +943,17 @@ class ConnectorTrainingTests(unittest.TestCase):
 
             @staticmethod
             def pad(encoded, padding, max_length, return_tensors):
-                if padding != "max_length" or return_tensors != "pt":
+                if padding not in {"max_length", "longest"} or return_tensors != "pt":
                     raise AssertionError((padding, return_tensors))
+                target_length = (
+                    max_length if padding == "max_length"
+                    else max(len(sequence) for sequence in encoded["input_ids"])
+                )
                 padded = {}
                 for name, sequences in encoded.items():
                     pad_value = 0
                     padded[name] = torch.tensor([
-                        sequence + [pad_value] * (max_length - len(sequence))
+                        sequence + [pad_value] * (target_length - len(sequence))
                         for sequence in sequences
                     ])
                 return BatchEncoding(padded)
@@ -870,15 +988,20 @@ class ConnectorTrainingTests(unittest.TestCase):
         self.assertEqual(hidden.shape, (2, 2, 6, 3))
         self.assertEqual(mask.shape, (2, 6))
 
+        hidden, mask = make_encode_gemma(state)(
+            ["one two", "three"], pad_to_max_length=False)
+        self.assertEqual(hidden.shape, (2, 2, 3, 3))
+        self.assertEqual(mask.shape, (2, 3))
+
         long_prompt = "one two three four five six seven"
         with self.assertRaisesRegex(ValueError, "refusing silent truncation"):
             make_encode_gemma(state)([long_prompt])
-        self.assertEqual(tokenizer.calls, 2)
+        self.assertEqual(tokenizer.calls, 3)
         self.assertEqual(state.gemma_truncated_prompt_count, 0)
 
         cfg.fail_on_prompt_truncation = False
         hidden, mask = make_encode_gemma(state)([long_prompt])
-        self.assertEqual(tokenizer.calls, 3)
+        self.assertEqual(tokenizer.calls, 4)
         self.assertEqual(hidden.shape, (1, 2, 6, 3))
         self.assertEqual(mask.sum().item(), 6)
         self.assertEqual(state.gemma_truncated_prompt_count, 1)
