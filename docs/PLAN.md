@@ -16,6 +16,22 @@ CLIP-RMS-normalized residual-norm penalties. The pure `ella_tsc` replacement
 connector below is retained as a historical baseline, not the supported P1
 production direction.
 
+Before launching `config_clip_gemma_residual_p1.json`, create the immutable
+group-safe split (the script refuses a row-level split when no suitable image
+identity is present):
+
+```bash
+uv run python scripts/prepare_residual_holdout_split.py \
+  /mnt/e/data/unsplash-lite-gemma-captions/artifacts/production/unsplash_lite_gemma_captions_10000.parquet \
+  --output-dir /mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split
+```
+
+Evaluate a completed checkpoint with
+`scripts/evaluate_residual_paired.py`; it uses identical held-out images,
+latents, noise, and timesteps for residual and native CLIP predictions. Also
+run `scripts/verify_checkpoint_text_encoder.py <stylejourney.safetensors>`
+before treating OpenAI CLIP as the StyleJourney-native baseline.
+
 The supported P1 baseline is now **approximately 256-token Gemma captions
 (336-token safety window) -> 77 SD1.5 conditioning tokens**. `ella_tsc` is a
 fixed-query, timestep-aware resampler

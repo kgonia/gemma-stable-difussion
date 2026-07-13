@@ -121,6 +121,9 @@ class TrainConfig:
     pretrain_lr: float = 1e-4
     ella_lr: float = 1e-4
     sara_lr: float = 1e-5
+    gradient_accumulation_steps: int = 1
+    lr_warmup_steps: int = 0
+    lr_decay_steps: int = 0  # 0 = no scheduler
     lambda_diffusion: float = 1.0
     lambda_teacher: float = 0.5
     lambda_text_delta: float = 1.0
@@ -145,6 +148,7 @@ class TrainConfig:
     data_sources: List[str] = field(default_factory=lambda: [
         "jackyhate/text-to-image-2M",
     ])
+    validation_data_sources: List[str] = field(default_factory=list)
     max_image_dimension: int = 1024
     aspect_ratio_buckets: List[List[int]] = field(default_factory=lambda: [
         [1024, 1024], [1024, 896], [1024, 768], [1024, 640], [1024, 512],
@@ -323,6 +327,12 @@ class TrainConfig:
             raise ValueError("residual penalty weights must be non-negative")
         if self.residual_checkpoint_every_opt_steps < 0:
             raise ValueError("residual_checkpoint_every_opt_steps must be non-negative")
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be at least 1")
+        if self.lr_warmup_steps < 0 or self.lr_decay_steps < 0:
+            raise ValueError("learning-rate schedule steps must be non-negative")
+        if self.lr_decay_steps and self.lr_decay_steps < self.lr_warmup_steps:
+            raise ValueError("lr_decay_steps must be >= lr_warmup_steps")
         camera_dropouts = (
             self.camera_metadata_dropout_prob_ella,
             self.camera_metadata_dropout_prob_sara,
@@ -394,6 +404,9 @@ class TrainConfig:
                 not isinstance(source, str) or not source.strip()
                 for source in self.data_sources):
             raise ValueError("data_sources must contain at least one location")
+        if any(not isinstance(source, str) or not source.strip()
+               for source in self.validation_data_sources):
+            raise ValueError("validation_data_sources must contain valid paths")
         for field_name, sources in (
             ("pretrain_prompt_sources", self.pretrain_prompt_sources),
             ("pretrain_validation_prompt_sources",

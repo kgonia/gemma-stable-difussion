@@ -29,6 +29,34 @@ from tqdm import tqdm
 from pure_ella.camera import camera_conditioned_unet, make_camera_condition
 
 
+@torch.no_grad()
+def _connector_context_for_prompts(state, prompts, timesteps):
+    """Build conditioning for either legacy or CLIP-residual connectors."""
+    prompts = list(prompts)
+    cfg = state.cfg
+    if getattr(cfg, "connector_type", "ella_tsc") != "clip_gemma_residual_tsc":
+        hidden, mask = state.encode_gemma(prompts)
+        return state.connector(hidden.to(dtype=state.unet_dtype), timesteps,
+                               mask, context_tokens=cfg.context_tokens)
+    clip_context, _ = state.encode_clip(prompts)
+    context = clip_context.clone()
+    raw = state.clip_tokenizer(prompts, padding=False, truncation=False)
+    long_mask = torch.tensor(
+        [len(ids) > cfg.clip_anchor_tokens for ids in raw["input_ids"]],
+        device=state.device, dtype=torch.bool)
+    if not bool(long_mask.any()):
+        return context
+    indices = long_mask.nonzero(as_tuple=True)[0]
+    long_prompts = [prompts[i] for i in indices.tolist()]
+    hidden, mask = state.encode_gemma(long_prompts)
+    delta = state.connector(
+        clip_context[indices].to(dtype=state.unet_dtype),
+        hidden.to(dtype=state.unet_dtype), timesteps[indices], mask,
+        context_tokens=cfg.context_tokens)
+    context[indices] = clip_context[indices] + cfg.residual_strength * delta
+    return context
+
+
 # ---------------------------------------------------------------------------
 # Final summaries — global dict for unhidden printing
 # ---------------------------------------------------------------------------
@@ -354,8 +382,7 @@ def connector_prompt_sensitivity(prompts: List[str], state, timestep: int = 500,
     t = torch.tensor([timestep], device=device).long()
     preds = []
     for ptxt in prompts:
-        gh, gm = encode_gemma([ptxt])
-        ctx = connector(gh.to(dtype=unet_dtype), t, gm, context_tokens=cfg.context_tokens)
+        ctx = _connector_context_for_prompts(state, [ptxt], t)
         pred = camera_conditioned_unet(
             unet, latent, t, encoder_hidden_states=ctx).sample.float()
         preds.append(pred)
@@ -408,11 +435,7 @@ def teacher_student_delta_alignment(prompt: str, state, timestep: int = 500, lab
     ).sample.float()
     teacher_cond, teacher_uncond = teacher.chunk(2)
 
-    gh, gm = encode_gemma([prompt])
-    ugh, ugm = encode_gemma([""])
-    gemma_h = torch.cat([gh, ugh], dim=0)
-    gemma_m = torch.cat([gm, ugm], dim=0)
-    ctx = connector(gemma_h.to(dtype=unet_dtype), t_pair, gemma_m, context_tokens=cfg.context_tokens)
+    ctx = _connector_context_for_prompts(state, [prompt, ""], t_pair)
     student = camera_conditioned_unet(
         unet, noisy_pair, t_pair, encoder_hidden_states=ctx).sample.float()
     student_cond, student_uncond = student.chunk(2)
@@ -461,13 +484,8 @@ def camera_counterfactual_sensitivity(
     noisy_pair = noisy.expand(2, -1, -1, -1)
     timestep_pair = timestep.expand(2)
 
-    cond_h, cond_mask = state.encode_gemma([prompt])
-    uncond_h, uncond_mask = state.encode_gemma([""])
-    gemma_h = torch.cat((cond_h, uncond_h), dim=0)
-    gemma_mask = torch.cat((cond_mask, uncond_mask), dim=0)
-    context = connector(
-        gemma_h.to(dtype=state.unet_dtype), timestep_pair, gemma_mask,
-        context_tokens=cfg.context_tokens)
+    context = _connector_context_for_prompts(
+        state, [prompt, ""], timestep_pair)
 
     def evaluate(name: str, field_name: str,
                  value_a: float, value_b: float):
@@ -550,8 +568,7 @@ def fixed_overfit_loss(state, label: str = "fixed_overfit", timestep: int = 500,
     t_val = min(timestep, scheduler.config.num_train_timesteps - 1)
     t = torch.full((latent.shape[0],), t_val, device=device).long()
     noisy = scheduler.add_noise(latent, noise, t)
-    gh, gm = encode_gemma(captions)
-    ctx = connector(gh.to(dtype=unet_dtype), t, gm, context_tokens=cfg.context_tokens)
+    ctx = _connector_context_for_prompts(state, captions, t)
     camera_condition = batch.get("camera_condition")
     pred = camera_conditioned_unet(
         unet, noisy, t, encoder_hidden_states=ctx,
@@ -813,15 +830,10 @@ def suffix_counterfactual_sensitivity(
         t = torch.tensor([int(timestep)], device=device).long()
         noisy = scheduler.add_noise(latent, noise, t)
         
-        # Encode prompts
-        gh_a, gm_a = encode_gemma([prompt_a])
-        gh_b, gm_b = encode_gemma([prompt_b])
-        ugh, ugm = encode_gemma([""])
-        
-        # Get contexts (cond + uncond for each)
-        ctx_a_c = connector(gh_a.to(dtype=unet_dtype), t, gm_a, context_tokens=ctx)
-        ctx_u = connector(ugh.to(dtype=unet_dtype), t, ugm, context_tokens=ctx)
-        ctx_b_c = connector(gh_b.to(dtype=unet_dtype), t, gm_b, context_tokens=ctx)
+        # Get contexts; residual mode preserves native CLIP for the blank path.
+        ctx_a_c = _connector_context_for_prompts(state, [prompt_a], t)
+        ctx_u = _connector_context_for_prompts(state, [""], t)
+        ctx_b_c = _connector_context_for_prompts(state, [prompt_b], t)
         
         # UNet predictions
         pred_a_c = camera_conditioned_unet(

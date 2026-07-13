@@ -17,14 +17,20 @@
   "residual_penalty_floor": 0.001,
   "residual_checkpoint_every_opt_steps": 250,
   "train_batch_size": 1,
+  "gradient_accumulation_steps": 8,
   "ella_lr": 3e-05,
+  "lr_warmup_steps": 100,
+  "lr_decay_steps": 1161,
   "max_samples_ella": 9293,
   "ella_epochs": 1,
-  "ella_max_opt_steps": 9293,
+  "ella_max_opt_steps": 1161,
   "validation_every_opt_steps": 250,
   "generation_grid_every_opt_steps": 500,
   "data_sources": [
-    "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/production/unsplash_lite_gemma_captions_10000.parquet"
+    "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/train.parquet"
+  ],
+  "validation_data_sources": [
+    "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/validation.parquet"
   ],
   "caption_mix_short": 0.0,
   "caption_mix_medium": 0.0,

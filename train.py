@@ -533,6 +533,12 @@ def connector_checkpoint_schema(state: TrainingState) -> dict:
         "context_tokens": cfg.context_tokens,
         "clip_anchor_tokens": cfg.clip_anchor_tokens,
         "connector_width": cfg.connector_width,
+        "connector_layers": cfg.connector_layers,
+        "connector_heads": cfg.connector_heads,
+        "connector_ff_mult": cfg.connector_ff_mult,
+        "connector_time_embed_dim": cfg.connector_time_embed_dim,
+        "connector_dropout": cfg.connector_dropout,
+        "gemma_dim": state.gemma_hidden_size,
         "gemma_layer_mix_count": cfg.gemma_layer_mix_count,
         "residual": is_residual_connector(cfg),
     }
@@ -669,9 +675,13 @@ def prompt_exceeds_clip_window(state: TrainingState, prompts) -> torch.Tensor:
 
 def _clip_visible_prefixes(state: TrainingState, prompts) -> list[str]:
     """Decode the same CLIP-visible token prefix used for the prefix-null loss."""
-    encoded = state.clip_tokenizer(_as_prompt_list(prompts), padding=False,
-                                   truncation=False)
-    return [state.clip_tokenizer.decode(ids[:state.cfg.clip_anchor_tokens],
+    # Let CLIP's tokenizer reserve its EOS slot.  Manual ``ids[:77]`` keeps
+    # BOS plus 76 content tokens and omits EOS, while the real CLIP encoder
+    # sees BOS + 75 content tokens + EOS.
+    encoded = state.clip_tokenizer(
+        _as_prompt_list(prompts), padding="max_length", truncation=True,
+        max_length=state.cfg.clip_anchor_tokens)
+    return [state.clip_tokenizer.decode(ids,
                                         skip_special_tokens=True)
             for ids in encoded["input_ids"]]
 
@@ -878,6 +888,17 @@ def run_clip_pretrain(state: TrainingState):
     log_vram("clip_pretrain_start", 0, state)
 
     opt_step = 0
+    accumulation = cfg.gradient_accumulation_steps
+    accumulation_count = 0
+    lr_scheduler = None
+    if cfg.lr_decay_steps:
+        def lr_scale(step):
+            if step < cfg.lr_warmup_steps:
+                return float(step + 1) / max(1, cfg.lr_warmup_steps)
+            progress = (step - cfg.lr_warmup_steps) / max(
+                1, cfg.lr_decay_steps - cfg.lr_warmup_steps)
+            return max(0.0, 1.0 - progress)
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_scale)
     best = None
     last_pretrain = {}
     validation_sets = (
@@ -1346,9 +1367,10 @@ def _run_periodic_training_validation(
     )
     label = f"{phase_name}_step_{opt_step:06d}"
     fixed_overfit_loss(state, label=label, wandb=state.wandb)
-    teacher_student_delta_alignment(
-        cfg.val_prompts[0], state, label=label, wandb=state.wandb
-    )
+    if not is_residual_connector(cfg):
+        teacher_student_delta_alignment(
+            cfg.val_prompts[0], state, label=label, wandb=state.wandb
+        )
     if (
         cfg.run_long_context_diagnostics
         and cfg.max_gemma_len > cfg.clip_anchor_tokens
@@ -1420,8 +1442,8 @@ def run_diffusion_training_loop(
             dataloader,
             desc=f"{spec.display_name} {epoch + 1}/{spec.epochs}",
         )
+        optimizer.zero_grad(set_to_none=True)
         for batch in progress:
-            optimizer.zero_grad(set_to_none=True)
             output = diffusion_training_step(
                 state,
                 batch,
@@ -1431,12 +1453,20 @@ def run_diffusion_training_loop(
                 camera_dropout_probability=spec.camera_dropout_probability,
                 clip_geom=clip_geom,
             )
-            output.loss.backward()
+            (output.loss / accumulation).backward()
+            accumulation_count += 1
+            if accumulation_count < accumulation:
+                continue
             nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip_norm)
             optimizer.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            accumulation_count = 0
 
             opt_step += 1
             last_metrics = output.scalars(opt_step)
+            last_metrics["lr"] = optimizer.param_groups[0]["lr"]
             if (is_residual_connector(cfg)
                     and cfg.residual_checkpoint_every_opt_steps
                     and opt_step % cfg.residual_checkpoint_every_opt_steps == 0):
@@ -1461,6 +1491,7 @@ def run_diffusion_training_loop(
                     f"{spec.name}/clip_scaffold_scale": last_metrics[
                         "clip_scaffold_scale"
                     ],
+                    f"{spec.name}/lr": last_metrics["lr"],
                 }, wandb=state.wandb)
 
             _run_periodic_training_validation(
@@ -2065,10 +2096,19 @@ def run_reload_proof(state: TrainingState):
         print(f"Sparse UNet patch reload PASS: {loaded:,} values")
 
     with torch.no_grad():
-        gh, gm = state.encode_gemma(["a small red car", ""])
         t = torch.tensor([500, 500], device=state.device).long()
-        ctx = reloaded(gh.to(dtype=state.unet_dtype), t, gm,
-                        context_tokens=cfg.context_tokens)
+        if is_residual_connector(cfg):
+            clip_context, _ = state.encode_clip(["a small red car", ""])
+            gemma_h, gemma_mask = state.encode_gemma(["a small red car"])
+            ctx = clip_context.clone()
+            ctx[:1] += cfg.residual_strength * reloaded(
+                clip_context[:1].to(dtype=state.unet_dtype),
+                gemma_h.to(dtype=state.unet_dtype), t[:1], gemma_mask,
+                context_tokens=cfg.context_tokens)
+        else:
+            gh, gm = state.encode_gemma(["a small red car", ""])
+            ctx = reloaded(gh.to(dtype=state.unet_dtype), t, gm,
+                           context_tokens=cfg.context_tokens)
         test_latent = torch.randn(
             2, 4, 64, 64, device=state.device, dtype=state.unet_dtype)
         pred = camera_conditioned_unet(
@@ -2093,7 +2133,7 @@ def run_reload_proof(state: TrainingState):
     state.connector = reloaded
     state.unet = reloaded_unet
     state.camera_conditioner = reloaded_camera
-    if state.clip_model is not None:
+    if state.clip_model is not None and not is_residual_connector(cfg):
         del state.clip_model
         del state.clip_tokenizer
         state.clip_model = None
