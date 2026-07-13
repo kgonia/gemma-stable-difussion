@@ -13,10 +13,10 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import math
 import os
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -83,6 +83,7 @@ class TrainingState:
     cfg: TrainConfig
     device: torch.device
     unet_dtype: torch.dtype
+    autocast_dtype: Optional[torch.dtype] = None
 
     # Models
     gemma_model: Any = None
@@ -135,12 +136,62 @@ class StagePlan:
               f"image_exposures={self.image_exposures:,}")
 
 
-def estimate_steps(max_samples: int, batch_size: int, epochs: int,
-                   cap: Optional[int], drop_last: bool = False) -> StagePlan:
+@dataclass(frozen=True)
+class DiffusionPhaseSpec:
+    """Phase-specific controls for the shared diffusion training loop."""
+    name: str
+    display_name: str
+    plan_name: str
+    data_phase: int
+    epochs: int
+    max_samples: int
+    max_opt_steps: int
+    semantic_anchor_weight: float
+    use_teacher_delta: bool
+
+
+@dataclass
+class DiffusionStepOutput:
+    """Differentiable loss tensors returned by one shared training step."""
+    loss: torch.Tensor
+    loss_diff: torch.Tensor
+    loss_teacher: torch.Tensor
+    loss_delta: torch.Tensor
+    loss_anchor: torch.Tensor
+    clip_scaffold_scale: float
+
+    def scalars(self, step: int) -> dict:
+        return {
+            "step": step,
+            "loss": float(self.loss.detach().item()),
+            "loss_diff": float(self.loss_diff.detach().item()),
+            "loss_teacher": float(self.loss_teacher.detach().item()),
+            "loss_delta": float(self.loss_delta.detach().item()),
+            "loss_anchor": float(self.loss_anchor.detach().item()),
+            "clip_scaffold_scale": self.clip_scaffold_scale,
+        }
+
+
+def estimate_steps(
+    max_samples: int,
+    batch_size: int,
+    epochs: int,
+    cap: Optional[int],
+    drop_last: bool = False,
+    bucket_count: int = 1,
+) -> StagePlan:
+    """Return an upper-bound plan that accounts for per-bucket tail batches."""
     if drop_last:
         steps_per_epoch = int(max_samples) // int(batch_size)
     else:
-        steps_per_epoch = math.ceil(int(max_samples) / int(batch_size))
+        active_buckets = min(
+            max(int(bucket_count), 1),
+            max(int(max_samples), 0),
+        )
+        remaining = max(int(max_samples) - active_buckets, 0)
+        steps_per_epoch = (
+            active_buckets + remaining // int(batch_size)
+        )
     uncapped = steps_per_epoch * int(epochs)
     effective = min(uncapped, int(cap)) if cap is not None else uncapped
     return StagePlan(
@@ -150,6 +201,43 @@ def estimate_steps(max_samples: int, batch_size: int, epochs: int,
         effective=effective,
         image_exposures=effective * int(batch_size),
     )
+
+
+def resolve_model_weight_dtype(cfg: TrainConfig) -> torch.dtype:
+    return {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+    }[cfg.model_weight_dtype]
+
+
+def resolve_autocast_dtype(cfg: TrainConfig, device: torch.device):
+    if cfg.mixed_precision == "no":
+        return None
+    if device.type != "cuda":
+        print(
+            f"WARNING: mixed_precision={cfg.mixed_precision} requires CUDA; "
+            "autocast disabled"
+        )
+        return None
+    if cfg.mixed_precision == "bf16" and not torch.cuda.is_bf16_supported():
+        raise RuntimeError(
+            "mixed_precision='bf16' requested but this CUDA device does not "
+            "support bfloat16; set mixed_precision='no'"
+        )
+    return torch.bfloat16
+
+
+@contextmanager
+def model_autocast(state: TrainingState):
+    """Autocast forward operations without lowering parameter precision."""
+    if state.autocast_dtype is None:
+        yield
+        return
+    with torch.autocast(
+        device_type=state.device.type,
+        dtype=state.autocast_dtype,
+    ):
+        yield
 
 
 def masked_mse(prediction: torch.Tensor, target: torch.Tensor,
@@ -486,9 +574,14 @@ def run_clip_pretrain(state: TrainingState):
     state.unet.eval()
     state.vae.eval()
 
-    plan = estimate_steps(cfg.max_samples_pretrain, cfg.train_batch_size,
-                          cfg.pretrain_epochs, cfg.pretrain_max_opt_steps,
-                          drop_last=cfg.drop_last_bucket_batches)
+    plan = estimate_steps(
+        cfg.max_samples_pretrain,
+        cfg.train_batch_size,
+        cfg.pretrain_epochs,
+        cfg.pretrain_max_opt_steps,
+        drop_last=cfg.drop_last_bucket_batches,
+        bucket_count=len(cfg.aspect_ratio_buckets),
+    )
     plan.name = "clip_pretrain"
     plan.print()
 
@@ -528,11 +621,13 @@ def run_clip_pretrain(state: TrainingState):
                 )
             with torch.no_grad():
                 gh, gm = state.encode_gemma(captions)
-                ch, cm = state.encode_clip(captions)
+                with model_autocast(state):
+                    ch, cm = state.encode_clip(captions)
             t = torch.zeros(len(captions), device=state.device, dtype=torch.long)
-            pred = state.connector(
-                gh.to(dtype=state.unet_dtype), t, gm,
-                context_tokens=cfg.clip_anchor_tokens)
+            with model_autocast(state):
+                pred = state.connector(
+                    gh.to(dtype=state.unet_dtype), t, gm,
+                    context_tokens=cfg.clip_anchor_tokens)
             ld = clip_geom(pred, ch, cm)
             loss = ld["total"]
             if not torch.isfinite(loss):
@@ -627,6 +722,298 @@ def run_clip_pretrain(state: TrainingState):
 
 
 # ---------------------------------------------------------------------------
+# Shared diffusion training step and loop
+# ---------------------------------------------------------------------------
+def diffusion_training_step(
+    state: TrainingState,
+    batch: dict,
+    opt_step: int,
+    *,
+    use_teacher_delta: bool,
+    semantic_anchor_weight: float,
+    clip_geom: Optional[ClipGeometryLoss] = None,
+) -> DiffusionStepOutput:
+    """Run one Phase 1/2 forward pass and assemble the common loss."""
+    cfg = state.cfg
+    captions = apply_conditioning_dropout(
+        select_training_captions(batch, state),
+        cfg.conditioning_dropout_prob,
+    )
+    image = batch["image"].to(
+        device=state.device,
+        dtype=state.unet_dtype,
+    )
+    image_mask = batch.get("image_mask")
+    if image_mask is not None:
+        image_mask = image_mask.to(device=state.device)
+
+    with torch.no_grad():
+        with model_autocast(state):
+            latent = (
+                state.vae.encode(image).latent_dist.sample()
+                * state.vae.config.scaling_factor
+            )
+        noise = torch.randn_like(latent)
+        timestep = torch.randint(
+            0,
+            state.scheduler.config.num_train_timesteps,
+            (latent.shape[0],),
+            device=state.device,
+        ).long()
+        noisy = state.scheduler.add_noise(latent, noise, timestep)
+        gemma_h, gemma_mask = state.encode_gemma(captions)
+
+    loss_teacher = noise.new_tensor(0.0)
+    loss_delta = noise.new_tensor(0.0)
+    loss_anchor = noise.new_tensor(0.0)
+
+    with model_autocast(state):
+        if use_teacher_delta:
+            empty = [""] * len(captions)
+            with torch.no_grad():
+                uncond_h, uncond_mask = state.encode_gemma(empty)
+            noisy_pair = torch.cat([noisy, noisy], dim=0)
+            timestep_pair = torch.cat([timestep, timestep], dim=0)
+            gemma_pair = torch.cat([gemma_h, uncond_h], dim=0)
+            mask_pair = torch.cat([gemma_mask, uncond_mask], dim=0)
+            context = state.connector(
+                gemma_pair.to(dtype=state.unet_dtype),
+                timestep_pair,
+                mask_pair,
+                context_tokens=cfg.context_tokens,
+            )
+            student_pair = state.unet(
+                noisy_pair,
+                timestep_pair,
+                encoder_hidden_states=context,
+            ).sample
+            student_cond, student_uncond = student_pair.chunk(2)
+            loss_diff = masked_mse(student_cond, noise, image_mask)
+
+            with torch.no_grad():
+                clip_h, clip_mask = state.encode_clip(captions)
+                uncond_clip_h, uncond_clip_mask = state.encode_clip(empty)
+                clip_pair = torch.cat([clip_h, uncond_clip_h], dim=0)
+                clip_mask_pair = torch.cat(
+                    [clip_mask, uncond_clip_mask], dim=0
+                )
+                teacher_pair = state.unet(
+                    noisy_pair,
+                    timestep_pair,
+                    encoder_hidden_states=clip_pair.to(
+                        dtype=state.unet_dtype
+                    ),
+                    encoder_attention_mask=clip_mask_pair,
+                ).sample.detach()
+                teacher_cond, teacher_uncond = teacher_pair.chunk(2)
+                teacher_delta = teacher_cond - teacher_uncond
+            student_delta = student_cond - student_uncond
+            loss_teacher = masked_mse(
+                student_cond, teacher_cond, image_mask
+            )
+            loss_delta = masked_mse(
+                student_delta, teacher_delta, image_mask
+            )
+        else:
+            context = state.connector(
+                gemma_h.to(dtype=state.unet_dtype),
+                timestep,
+                gemma_mask,
+                context_tokens=cfg.context_tokens,
+            )
+            student_cond = state.unet(
+                noisy,
+                timestep,
+                encoder_hidden_states=context,
+            ).sample
+            loss_diff = masked_mse(student_cond, noise, image_mask)
+
+        if semantic_anchor_weight > 0 and state.clip_model is not None:
+            if clip_geom is None:
+                raise ValueError(
+                    "clip_geom is required when semantic anchor weight is positive"
+                )
+            with torch.no_grad():
+                clip_h, clip_mask = state.encode_clip(captions)
+            pred77 = context[:len(captions), :cfg.clip_anchor_tokens, :]
+            loss_anchor = clip_geom(pred77, clip_h, clip_mask)["total"]
+
+        scaffold_scale = clip_scaffold_scale(cfg, opt_step)
+        loss = (
+            cfg.lambda_diffusion * loss_diff
+            + scaffold_scale * cfg.lambda_teacher * loss_teacher
+            + scaffold_scale * cfg.lambda_text_delta * loss_delta
+            + scaffold_scale * semantic_anchor_weight * loss_anchor
+        )
+
+    if not torch.isfinite(loss):
+        raise RuntimeError("Diffusion training loss is NaN/Inf")
+    return DiffusionStepOutput(
+        loss=loss,
+        loss_diff=loss_diff,
+        loss_teacher=loss_teacher,
+        loss_delta=loss_delta,
+        loss_anchor=loss_anchor,
+        clip_scaffold_scale=scaffold_scale,
+    )
+
+
+def _run_periodic_training_validation(
+    state: TrainingState,
+    phase_name: str,
+    opt_step: int,
+    metrics: dict,
+):
+    cfg = state.cfg
+    if not cfg.validation_every_opt_steps:
+        return
+    if opt_step % cfg.validation_every_opt_steps:
+        return
+
+    print(
+        f"{phase_name} step {opt_step}: loss={metrics['loss']:.5f} "
+        f"diff={metrics['loss_diff']:.5f} "
+        f"teacher={metrics['loss_teacher']:.5f} "
+        f"delta={metrics['loss_delta']:.5f} "
+        f"anchor={metrics['loss_anchor']:.5f}"
+    )
+    label = f"{phase_name}_step_{opt_step:06d}"
+    fixed_overfit_loss(state, label=label, wandb=state.wandb)
+    teacher_student_delta_alignment(
+        cfg.val_prompts[0], state, label=label, wandb=state.wandb
+    )
+    if (
+        cfg.run_long_context_diagnostics
+        and cfg.max_gemma_len > cfg.clip_anchor_tokens
+    ):
+        suffix_counterfactual_sensitivity(
+            state, label=label, wandb=state.wandb
+        )
+    if (
+        cfg.generation_grid_every_opt_steps > 0
+        and opt_step % cfg.generation_grid_every_opt_steps == 0
+    ):
+        save_checkpoint_grid(label, state)
+
+
+def run_diffusion_training_loop(
+    state: TrainingState,
+    spec: DiffusionPhaseSpec,
+    optimizer: torch.optim.Optimizer,
+    trainable_params: List[nn.Parameter],
+) -> dict:
+    """Shared data/optimization loop for connector-only and SaRA phases."""
+    cfg = state.cfg
+    clip_geom = (
+        ClipGeometryLoss() if spec.semantic_anchor_weight > 0 else None
+    )
+    plan = estimate_steps(
+        spec.max_samples,
+        cfg.train_batch_size,
+        spec.epochs,
+        spec.max_opt_steps,
+        drop_last=cfg.drop_last_bucket_batches,
+        bucket_count=len(cfg.aspect_ratio_buckets),
+    )
+    plan.name = spec.plan_name
+    plan.print()
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    log_vram(f"{spec.name}_start", 0, state)
+
+    opt_step = 0
+    best = None
+    last_metrics = {}
+    stop = False
+    started = time.time()
+
+    for epoch in range(spec.epochs):
+        dataloader = make_streaming_dataloader(
+            cfg.data_sources,
+            phase=spec.data_phase,
+            epoch=epoch,
+            max_samples=spec.max_samples,
+            batch_size=cfg.train_batch_size,
+            shuffle=cfg.shuffle_streaming,
+            shuffle_buffer=cfg.shuffle_buffer,
+            base_seed=cfg.base_seed,
+            buckets=cfg.aspect_ratio_buckets,
+            drop_last=cfg.drop_last_bucket_batches,
+            max_image_dimension=cfg.max_image_dimension,
+        )
+        progress = tqdm(
+            dataloader,
+            desc=f"{spec.display_name} {epoch + 1}/{spec.epochs}",
+        )
+        for batch in progress:
+            optimizer.zero_grad(set_to_none=True)
+            output = diffusion_training_step(
+                state,
+                batch,
+                opt_step,
+                use_teacher_delta=spec.use_teacher_delta,
+                semantic_anchor_weight=spec.semantic_anchor_weight,
+                clip_geom=clip_geom,
+            )
+            output.loss.backward()
+            nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip_norm)
+            optimizer.step()
+
+            opt_step += 1
+            last_metrics = output.scalars(opt_step)
+            best = (
+                last_metrics["loss"]
+                if best is None
+                else min(best, last_metrics["loss"])
+            )
+
+            if opt_step % 25 == 0:
+                safe_wandb_log({
+                    f"{spec.name}/step": opt_step,
+                    f"{spec.name}/loss": last_metrics["loss"],
+                    f"{spec.name}/loss_diff": last_metrics["loss_diff"],
+                    f"{spec.name}/loss_teacher": last_metrics["loss_teacher"],
+                    f"{spec.name}/loss_delta": last_metrics["loss_delta"],
+                    f"{spec.name}/loss_anchor": last_metrics["loss_anchor"],
+                    f"{spec.name}/clip_scaffold_scale": last_metrics[
+                        "clip_scaffold_scale"
+                    ],
+                }, wandb=state.wandb)
+
+            _run_periodic_training_validation(
+                state, spec.name, opt_step, last_metrics
+            )
+            progress.set_postfix({
+                "loss": f"{last_metrics['loss']:.4f}",
+                "best": f"{best:.4f}",
+            })
+            if spec.max_opt_steps and opt_step >= spec.max_opt_steps:
+                stop = True
+                print(
+                    f"Stopping {spec.display_name} at step cap {opt_step}"
+                )
+                break
+        if stop:
+            break
+
+    elapsed_min = (time.time() - started) / 60
+    log_vram(f"{spec.name}_end", opt_step, state)
+    return {
+        "steps": opt_step,
+        "best_loss": best if best is not None else float("nan"),
+        "elapsed_min": elapsed_min,
+        "final_loss": last_metrics.get("loss", float("nan")),
+        "final_loss_diff": last_metrics.get("loss_diff", float("nan")),
+        "final_loss_teacher": last_metrics.get(
+            "loss_teacher", float("nan")
+        ),
+        "final_loss_delta": last_metrics.get("loss_delta", float("nan")),
+        "final_loss_anchor": last_metrics.get("loss_anchor", float("nan")),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Phase 1: ELLA connector diffusion + teacher-delta training
 # ---------------------------------------------------------------------------
 def run_ella_training(state: TrainingState):
@@ -635,22 +1022,39 @@ def run_ella_training(state: TrainingState):
         print("ELLA connector phase skipped")
         return
 
-    for p in state.unet.parameters(): p.requires_grad_(False)
-    for p in state.vae.parameters(): p.requires_grad_(False)
-    for p in state.gemma_model.parameters(): p.requires_grad_(False)
+    for p in state.unet.parameters():
+        p.requires_grad_(False)
+    for p in state.vae.parameters():
+        p.requires_grad_(False)
+    for p in state.gemma_model.parameters():
+        p.requires_grad_(False)
     if state.clip_model is not None:
-        for p in state.clip_model.parameters(): p.requires_grad_(False)
-    for p in state.connector.parameters(): p.requires_grad_(True)
+        for p in state.clip_model.parameters():
+            p.requires_grad_(False)
+    for p in state.connector.parameters():
+        p.requires_grad_(True)
+
+    trainable_params = [
+        parameter
+        for parameter in state.connector.parameters()
+        if parameter.requires_grad
+    ]
 
     optimizer = torch.optim.AdamW(
-        state.connector.parameters(), lr=cfg.ella_lr,
-        weight_decay=0.01, eps=1e-6)
+        trainable_params,
+        lr=cfg.ella_lr,
+        weight_decay=0.01,
+        eps=1e-6,
+    )
     use_teacher_delta = bool(
         cfg.use_clip_teacher_delta
         and (cfg.lambda_teacher > 0 or cfg.lambda_text_delta > 0)
-        and state.clip_model is not None)
-    print("Phase 1 forward mode:",
-          "paired_cfg_teacher" if use_teacher_delta else "conditional_only")
+        and state.clip_model is not None
+    )
+    print(
+        "Phase 1 forward mode:",
+        "paired_cfg_teacher" if use_teacher_delta else "conditional_only",
+    )
 
     state.connector.train()
     state.unet.eval()
@@ -658,194 +1062,32 @@ def run_ella_training(state: TrainingState):
     state.gemma_model.eval()
     if state.clip_model is not None:
         state.clip_model.eval()
-    clip_geom = (ClipGeometryLoss()
-                 if cfg.phase1_semantic_anchor_weight > 0 else None)
-
-    plan = estimate_steps(cfg.max_samples_ella, cfg.train_batch_size,
-                          cfg.ella_epochs, cfg.ella_max_opt_steps,
-                          drop_last=cfg.drop_last_bucket_batches)
-    plan.name = "ella_frozen_unet"
-    plan.print()
-
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    log_vram("ella_start", 0, state)
-
-    opt_step = 0
-    best = None
-    last_ella = {}
-    stop = False
-    t0 = time.time()
-
-    for epoch in range(cfg.ella_epochs):
-        dl = make_streaming_dataloader(
-            cfg.data_sources, phase=20, epoch=epoch,
+    ella_summary = run_diffusion_training_loop(
+        state,
+        DiffusionPhaseSpec(
+            name="ella",
+            display_name="ELLA",
+            plan_name="ella_frozen_unet",
+            data_phase=20,
+            epochs=cfg.ella_epochs,
             max_samples=cfg.max_samples_ella,
-            batch_size=cfg.train_batch_size,
-            shuffle=cfg.shuffle_streaming,
-            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
-            buckets=cfg.aspect_ratio_buckets,
-            drop_last=cfg.drop_last_bucket_batches,
-            max_image_dimension=cfg.max_image_dimension)
-        progress = tqdm(dl, desc=f"ELLA {epoch+1}/{cfg.ella_epochs}")
-        for batch in progress:
-            captions = apply_conditioning_dropout(
-                select_training_captions(batch, state),
-                cfg.conditioning_dropout_prob)
-            img = batch["image"].to(device=state.device,
-                                     dtype=state.unet_dtype)
-            image_mask = batch.get("image_mask")
-            if image_mask is not None:
-                image_mask = image_mask.to(device=state.device)
-
-            with torch.no_grad():
-                latent = (state.vae.encode(img).latent_dist.sample()
-                          * state.vae.config.scaling_factor)
-                noise = torch.randn_like(latent)
-                t = torch.randint(
-                    0, state.scheduler.config.num_train_timesteps,
-                    (latent.shape[0],), device=state.device).long()
-                noisy = state.scheduler.add_noise(latent, noise, t)
-                gh, gm = state.encode_gemma(captions)
-
-            loss_teacher = noise.new_tensor(0.0)
-            loss_delta = noise.new_tensor(0.0)
-            loss_anchor = noise.new_tensor(0.0)
-
-            if use_teacher_delta:
-                empty = [""] * len(captions)
-                with torch.no_grad():
-                    ugh, ugm = state.encode_gemma(empty)
-                noisy_pair = torch.cat([noisy, noisy], dim=0)
-                t_pair = torch.cat([t, t], dim=0)
-                g_pair = torch.cat([gh, ugh], dim=0)
-                m_pair = torch.cat([gm, ugm], dim=0)
-                ctx = state.connector(
-                    g_pair.to(dtype=state.unet_dtype), t_pair, m_pair,
-                    context_tokens=cfg.context_tokens)
-                student_pair = state.unet(
-                    noisy_pair, t_pair, encoder_hidden_states=ctx).sample
-                student_cond, student_uncond = student_pair.chunk(2)
-                loss_diff = masked_mse(student_cond, noise, image_mask)
-
-                with torch.no_grad():
-                    ch, cm = state.encode_clip(captions)
-                    uch, ucm = state.encode_clip(empty)
-                    clip_pair = torch.cat([ch, uch], dim=0)
-                    clip_m_pair = torch.cat([cm, ucm], dim=0)
-                    teacher_pair = state.unet(
-                        noisy_pair, t_pair,
-                        encoder_hidden_states=clip_pair.to(dtype=state.unet_dtype),
-                        encoder_attention_mask=clip_m_pair).sample.detach()
-                    teacher_cond, teacher_uncond = teacher_pair.chunk(2)
-                    teacher_delta = teacher_cond - teacher_uncond
-                student_delta = student_cond - student_uncond
-                loss_teacher = masked_mse(
-                    student_cond, teacher_cond, image_mask)
-                loss_delta = masked_mse(
-                    student_delta, teacher_delta, image_mask)
-            else:
-                ctx = state.connector(
-                    gh.to(dtype=state.unet_dtype), t, gm,
-                    context_tokens=cfg.context_tokens)
-                student_cond = state.unet(
-                    noisy, t, encoder_hidden_states=ctx).sample
-                loss_diff = masked_mse(student_cond, noise, image_mask)
-
-            if (cfg.phase1_semantic_anchor_weight > 0
-                    and state.clip_model is not None):
-                with torch.no_grad():
-                    ch, cm = state.encode_clip(captions)
-                pred77 = ctx[:len(captions), :cfg.clip_anchor_tokens, :]
-                loss_anchor = clip_geom(pred77, ch, cm)["total"]
-
-            scaffold_scale = clip_scaffold_scale(cfg, opt_step)
-            loss = (cfg.lambda_diffusion * loss_diff
-                    + scaffold_scale * cfg.lambda_teacher * loss_teacher
-                    + scaffold_scale * cfg.lambda_text_delta * loss_delta
-                    + scaffold_scale * cfg.phase1_semantic_anchor_weight * loss_anchor)
-
-            if not torch.isfinite(loss):
-                raise RuntimeError("ELLA loss NaN/Inf")
-
-            last_ella = {
-                "step": opt_step + 1,
-                "loss": loss.item(),
-                "loss_diff": loss_diff.item(),
-                "loss_teacher": float(loss_teacher.item()),
-                "loss_delta": float(loss_delta.item()),
-                "loss_anchor": float(loss_anchor.item()),
-                "clip_scaffold_scale": scaffold_scale,
-            }
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            nn.utils.clip_grad_norm_(state.connector.parameters(),
-                                      cfg.grad_clip_norm)
-            optimizer.step()
-            opt_step += 1
-            best = (float(loss.item()) if best is None
-                    else min(best, float(loss.item())))
-
-            if opt_step % 25 == 0:
-                safe_wandb_log({
-                    "ella/step": opt_step,
-                    "ella/loss": loss.item(),
-                    "ella/loss_diff": loss_diff.item(),
-                    "ella/loss_teacher": float(loss_teacher.item()),
-                    "ella/loss_delta": float(loss_delta.item()),
-                    "ella/loss_anchor": float(loss_anchor.item()),
-                    "ella/clip_scaffold_scale": scaffold_scale,
-                }, wandb=state.wandb)
-
-            if (cfg.validation_every_opt_steps
-                    and opt_step % cfg.validation_every_opt_steps == 0):
-                print(f"ella step {opt_step}: loss={loss.item():.5f} "
-                      f"diff={loss_diff.item():.5f} "
-                      f"teacher={loss_teacher.item():.5f} "
-                      f"delta={loss_delta.item():.5f} "
-                      f"anchor={loss_anchor.item():.5f}")
-                fixed_overfit_loss(
-                    state, label=f"ella_step_{opt_step:06d}",
-                    wandb=state.wandb)
-                teacher_student_delta_alignment(
-                    cfg.val_prompts[0], state,
-                    label=f"ella_step_{opt_step:06d}", wandb=state.wandb)
-                if (cfg.run_long_context_diagnostics
-                        and cfg.max_gemma_len > cfg.clip_anchor_tokens):
-                    suffix_counterfactual_sensitivity(
-                        state, label=f"ella_step_{opt_step:06d}",
-                        wandb=state.wandb)
-                if (cfg.generation_grid_every_opt_steps > 0
-                        and opt_step % cfg.generation_grid_every_opt_steps == 0):
-                    save_checkpoint_grid(
-                        f"ella_step_{opt_step:06d}", state)
-
-            progress.set_postfix(
-                {"loss": f"{loss.item():.4f}", "best": f"{best:.4f}"})
-            if cfg.ella_max_opt_steps and opt_step >= cfg.ella_max_opt_steps:
-                stop = True
-                print("Stopping ELLA at step cap", opt_step)
-                break
-        if stop:
-            break
-
-    elapsed_min = (time.time() - t0) / 60
-    log_vram("ella_end", opt_step, state)
-    ella_summary = {
-        "steps": opt_step,
-        "best_loss": best or float("nan"),
-        "elapsed_min": elapsed_min,
-        "final_loss": last_ella.get("loss", float("nan")),
-        "final_loss_diff": last_ella.get("loss_diff", float("nan")),
-        "final_loss_teacher": last_ella.get("loss_teacher", float("nan")),
-        "final_loss_delta": last_ella.get("loss_delta", float("nan")),
-        "final_loss_anchor": last_ella.get("loss_anchor", float("nan")),
-    }
+            max_opt_steps=cfg.ella_max_opt_steps,
+            semantic_anchor_weight=cfg.phase1_semantic_anchor_weight,
+            use_teacher_delta=use_teacher_delta,
+        ),
+        optimizer,
+        trainable_params,
+    )
     remember_final_summary(
         "ella_frozen_unet", ella_summary,
-        wandb_prefix="final/ella_frozen_unet", wandb=state.wandb)
-    print(f"ELLA frozen-UNet done: steps={opt_step} best={best} "
-          f"elapsed={elapsed_min:.1f}m")
+        wandb_prefix="final/ella_frozen_unet",
+        wandb=state.wandb,
+    )
+    print(
+        f"ELLA frozen-UNet done: steps={ella_summary['steps']} "
+        f"best={ella_summary['best_loss']} "
+        f"elapsed={ella_summary['elapsed_min']:.1f}m"
+    )
     print_final_summary("ella_frozen_unet")
 
     ckpt_path = f"{cfg.output_dir}/ella_connector_frozen_unet.pt"
@@ -892,7 +1134,10 @@ def run_sara_training(state: TrainingState):
     trainable_params = trainable_connector + trainable_unet
     print(f"Trainable params in ELLA+SaRA: {sum(p.numel() for p in trainable_params):,}")
     print(f"  connector: {sum(p.numel() for p in trainable_connector):,}")
-    print(f"  sparse UNet: {sum(p.numel() for p in trainable_unet):,}")
+    print(
+        f"  masked UNet tensors: {sum(p.numel() for p in trainable_unet):,} "
+        f"({sara_summary['selected']:,} selected entries)"
+    )
 
     optimizer = torch.optim.AdamW([
         {"params": trainable_connector, "weight_decay": 0.01},
@@ -915,175 +1160,27 @@ def run_sara_training(state: TrainingState):
     state.gemma_model.eval()
     if state.clip_model is not None:
         state.clip_model.eval()
-    clip_geom = (ClipGeometryLoss()
-                 if cfg.phase2_semantic_anchor_weight > 0 else None)
-
-    plan = estimate_steps(cfg.max_samples_sara, cfg.train_batch_size,
-                          cfg.sara_epochs, cfg.sara_max_opt_steps,
-                          drop_last=cfg.drop_last_bucket_batches)
-    plan.name = "ella_sara_attn2_kv"
-    plan.print()
-
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    log_vram("sara_start", 0, state)
-
-    opt_step = 0
-    best = None
-    stop = False
-    t0 = time.time()
-
-    for epoch in range(cfg.sara_epochs):
-        dl = make_streaming_dataloader(
-            cfg.data_sources, phase=30, epoch=epoch,
+    sara_summary_dict = run_diffusion_training_loop(
+        state,
+        DiffusionPhaseSpec(
+            name="sara",
+            display_name="ELLA+SaRA",
+            plan_name="ella_sara_attn2_kv",
+            data_phase=30,
+            epochs=cfg.sara_epochs,
             max_samples=cfg.max_samples_sara,
-            batch_size=cfg.train_batch_size,
-            shuffle=cfg.shuffle_streaming,
-            shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
-            buckets=cfg.aspect_ratio_buckets,
-            drop_last=cfg.drop_last_bucket_batches,
-            max_image_dimension=cfg.max_image_dimension)
-        progress = tqdm(dl, desc=f"ELLA+SaRA {epoch+1}/{cfg.sara_epochs}")
-        for batch in progress:
-            captions = apply_conditioning_dropout(
-                select_training_captions(batch, state),
-                cfg.conditioning_dropout_prob)
-            img = batch["image"].to(device=state.device, dtype=state.unet_dtype)
-            image_mask = batch.get("image_mask")
-            if image_mask is not None:
-                image_mask = image_mask.to(device=state.device)
-
-            with torch.no_grad():
-                latent = (state.vae.encode(img).latent_dist.sample()
-                          * state.vae.config.scaling_factor)
-                noise = torch.randn_like(latent)
-                t = torch.randint(
-                    0, state.scheduler.config.num_train_timesteps,
-                    (latent.shape[0],), device=state.device).long()
-                noisy = state.scheduler.add_noise(latent, noise, t)
-                gh, gm = state.encode_gemma(captions)
-
-            loss_teacher = noise.new_tensor(0.0)
-            loss_delta = noise.new_tensor(0.0)
-            loss_anchor = noise.new_tensor(0.0)
-
-            if use_teacher_delta_phase2:
-                empty = [""] * len(captions)
-                with torch.no_grad():
-                    ugh, ugm = state.encode_gemma(empty)
-                noisy_pair = torch.cat([noisy, noisy], dim=0)
-                t_pair = torch.cat([t, t], dim=0)
-                g_pair = torch.cat([gh, ugh], dim=0)
-                m_pair = torch.cat([gm, ugm], dim=0)
-                ctx = state.connector(
-                    g_pair.to(dtype=state.unet_dtype), t_pair, m_pair,
-                    context_tokens=cfg.context_tokens)
-                student_pair = state.unet(
-                    noisy_pair, t_pair, encoder_hidden_states=ctx).sample
-                student_cond, student_uncond = student_pair.chunk(2)
-                loss_diff = masked_mse(student_cond, noise, image_mask)
-
-                with torch.no_grad():
-                    ch, cm = state.encode_clip(captions)
-                    uch, ucm = state.encode_clip(empty)
-                    clip_pair = torch.cat([ch, uch], dim=0)
-                    clip_m_pair = torch.cat([cm, ucm], dim=0)
-                    teacher_pair = state.unet(
-                        noisy_pair, t_pair,
-                        encoder_hidden_states=clip_pair.to(dtype=state.unet_dtype),
-                        encoder_attention_mask=clip_m_pair).sample.detach()
-                    teacher_cond, teacher_uncond = teacher_pair.chunk(2)
-                    teacher_delta = teacher_cond - teacher_uncond
-                student_delta = student_cond - student_uncond
-                loss_teacher = masked_mse(
-                    student_cond, teacher_cond, image_mask)
-                loss_delta = masked_mse(
-                    student_delta, teacher_delta, image_mask)
-            else:
-                ctx = state.connector(
-                    gh.to(dtype=state.unet_dtype), t, gm,
-                    context_tokens=cfg.context_tokens)
-                student_cond = state.unet(
-                    noisy, t, encoder_hidden_states=ctx).sample
-                loss_diff = masked_mse(student_cond, noise, image_mask)
-
-            if (cfg.phase2_semantic_anchor_weight > 0
-                    and state.clip_model is not None):
-                with torch.no_grad():
-                    ch, cm = state.encode_clip(captions)
-                pred77 = ctx[:len(captions), :cfg.clip_anchor_tokens, :]
-                loss_anchor = clip_geom(pred77, ch, cm)["total"]
-
-            scaffold_scale = clip_scaffold_scale(cfg, opt_step)
-            loss = (cfg.lambda_diffusion * loss_diff
-                    + scaffold_scale * cfg.lambda_teacher * loss_teacher
-                    + scaffold_scale * cfg.lambda_text_delta * loss_delta
-                    + scaffold_scale * cfg.phase2_semantic_anchor_weight * loss_anchor)
-            if not torch.isfinite(loss):
-                raise RuntimeError("ELLA+SaRA loss NaN/Inf")
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            nn.utils.clip_grad_norm_(trainable_params, cfg.grad_clip_norm)
-            optimizer.step()
-            opt_step += 1
-            best = (float(loss.item()) if best is None
-                    else min(best, float(loss.item())))
-
-            if opt_step % 25 == 0:
-                safe_wandb_log({
-                    "sara/step": opt_step,
-                    "sara/loss": loss.item(),
-                    "sara/loss_diff": loss_diff.item(),
-                    "sara/loss_teacher": float(loss_teacher.item()),
-                    "sara/loss_delta": float(loss_delta.item()),
-                    "sara/loss_anchor": float(loss_anchor.item()),
-                }, wandb=state.wandb)
-
-            if (cfg.validation_every_opt_steps
-                    and opt_step % cfg.validation_every_opt_steps == 0):
-                print(f"sara step {opt_step}: loss={loss.item():.5f} "
-                      f"diff={loss_diff.item():.5f} "
-                      f"teacher={loss_teacher.item():.5f} "
-                      f"delta={loss_delta.item():.5f} "
-                      f"anchor={loss_anchor.item():.5f}")
-                fixed_overfit_loss(
-                    state, label=f"sara_step_{opt_step:06d}",
-                    wandb=state.wandb)
-                teacher_student_delta_alignment(
-                    cfg.val_prompts[0], state,
-                    label=f"sara_step_{opt_step:06d}", wandb=state.wandb)
-                if (cfg.run_long_context_diagnostics
-                        and cfg.max_gemma_len > cfg.clip_anchor_tokens):
-                    suffix_counterfactual_sensitivity(
-                        state, label=f"sara_step_{opt_step:06d}",
-                        wandb=state.wandb)
-                if (cfg.generation_grid_every_opt_steps > 0
-                        and opt_step % cfg.generation_grid_every_opt_steps == 0):
-                    save_checkpoint_grid(
-                        f"sara_step_{opt_step:06d}", state)
-
-            progress.set_postfix(
-                {"loss": f"{loss.item():.4f}", "best": f"{best:.4f}"})
-            if (cfg.sara_max_opt_steps
-                    and opt_step >= cfg.sara_max_opt_steps):
-                stop = True
-                print("Stopping ELLA+SaRA at step cap", opt_step)
-                break
-        if stop:
-            break
-
-    elapsed_min = (time.time() - t0) / 60
-    log_vram("sara_end", opt_step, state)
-
-    sara_summary_dict = {
-        "steps": opt_step,
-        "best_loss": best or float("nan"),
-        "elapsed_min": elapsed_min,
+            max_opt_steps=cfg.sara_max_opt_steps,
+            semantic_anchor_weight=cfg.phase2_semantic_anchor_weight,
+            use_teacher_delta=use_teacher_delta_phase2,
+        ),
+        optimizer,
+        trainable_params,
+    )
+    sara_summary_dict.update({
         "sparse_selected": sara_summary["selected"],
         "sparse_total": sara_summary["total_target"],
         "sparse_fraction": sara_summary["fraction"],
-    }
+    })
     remember_final_summary(
         "sara_attn2_kv", sara_summary_dict,
         wandb_prefix="final/sara_attn2_kv", wandb=state.wandb)
@@ -1092,8 +1189,11 @@ def run_sara_training(state: TrainingState):
     state._sara_grad_handles = grad_handles
     state._sara_summary = sara_summary
 
-    print(f"ELLA+SaRA done: steps={opt_step} best={best} "
-          f"elapsed={elapsed_min:.1f}m")
+    print(
+        f"ELLA+SaRA done: steps={sara_summary_dict['steps']} "
+        f"best={sara_summary_dict['best_loss']} "
+        f"elapsed={sara_summary_dict['elapsed_min']:.1f}m"
+    )
     print_final_summary("sara_attn2_kv")
 
 
@@ -1468,7 +1568,8 @@ def main():
     seed_everything(cfg.base_seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    unet_dtype = torch.float32
+    unet_dtype = resolve_model_weight_dtype(cfg)
+    autocast_dtype = resolve_autocast_dtype(cfg, device)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
 
@@ -1498,7 +1599,12 @@ def main():
         wandb = NoWandb()
 
     state = TrainingState(
-        cfg=cfg, device=device, unet_dtype=unet_dtype, wandb=wandb)
+        cfg=cfg,
+        device=device,
+        unet_dtype=unet_dtype,
+        autocast_dtype=autocast_dtype,
+        wandb=wandb,
+    )
 
     cfg.print_plan()
 

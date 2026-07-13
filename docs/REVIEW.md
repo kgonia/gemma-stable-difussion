@@ -11,10 +11,10 @@ Findings ordered by severity. Status column is for tracking fixes.
 |---|----------|-------|---------|--------|
 | 1 | **Bug** | `train.py:800`, `train.py:817` | `max_samples_sara` never used — SaRA phase runs on `max_samples_ella` | **fixed** |
 | 2 | **Bug** | `pure_ella/config.py:294` | `resolve_sd_checkpoint` fallback chain unreachable for absolute paths | **fixed** |
-| 3 | Refactor | `train.py:490–745` vs `751–991` | ~200 duplicated lines between ELLA and SaRA training loops | open |
+| 3 | Refactor | shared diffusion step/loop | ~200 duplicated lines between ELLA and SaRA training loops | **fixed** |
 | 4 | Perf | `train.py:602`, `train.py:882` | `ClipGeometryLoss()` constructed every step inside the loop | **fixed** |
 | 5 | Memory | `pure_ella/sara.py:54` | Sparse masks stored at weight dtype (fp32) instead of bool | **fixed** |
-| 6 | Config | `train.py:1352` | `unet_dtype` hardcoded `torch.float32`, no bf16/autocast option | open |
+| 6 | Config | `pure_ella/config.py`, `train.py` | Explicit weight dtype and BF16 autocast | **fixed** |
 | 7 | Hazard | `pure_ella/config.py:279–282` | Unknown JSON keys silently dropped (typos vanish) | **fixed** |
 | 8 | Hazard | `pure_ella/config.py:213–218` | `context_tokens` in JSON silently overridden by `experiment_stage` | **fixed** |
 | 9 | Hazard | `pure_ella/config.py:224–245` | `run_mode` overfit/diagnostic overrides clobber JSON-provided budgets | **fixed** |
@@ -66,7 +66,7 @@ never tried, and the run later fails with a confusing HF 404 instead of a clear
 e.g. no leading `/`, `.`, or `~`, exactly one `/`, and no `.safetensors` suffix. Move
 that check after the whole existence loop.
 
-## 3. ELLA and SaRA loops duplicate the entire training step (refactor)
+## 3. Shared ELLA and SaRA training step (fixed)
 
 `run_ella_training` (train.py:490) and `run_sara_training` (train.py:751) share the
 teacher-delta paired forward, loss assembly, NaN gate, grad-stat logging, validation
@@ -77,9 +77,9 @@ This is the main blocker for the PLAN.md P3 work: metadata conditioning modifies
 training step, and today every such change must be written twice and kept in sync by
 hand.
 
-**Fix:** extract a shared `diffusion_training_step(state, batch, phase)` plus a loop
-driver parameterized by phase name, optimizer, budgets, and extra-loss hooks. Do this
-before starting P3.
+`diffusion_training_step` now owns image/latent preparation, conditional and
+teacher forwards, and loss assembly. `run_diffusion_training_loop` owns budgets,
+optimization, logging, and validation cadence for both phases.
 
 ## 4. `ClipGeometryLoss()` instantiated per step (perf, minor)
 
@@ -104,12 +104,12 @@ momentum, and the UNet param group uses `weight_decay=0.0` so decay cannot leak 
 non-selected entries. The sparse save/reload path (`collect_sara_sparse_values` /
 `load_sara_sparse_values`) round-trips correctly.
 
-## 6. `unet_dtype` hardcoded fp32 (config gap)
+## 6. Configurable model dtype and BF16 autocast (fixed)
 
-`train.py:1352`: `unet_dtype = torch.float32`. With batch 8 at 512×512 plus a paired
-CFG-teacher forward, this is the dominant VRAM cost. Gradient checkpointing is already
-configurable; dtype should be too (bf16 autocast for UNet/VAE forward, fp32 master
-weights for the sparse SaRA params).
+`model_weight_dtype` controls parameter storage and `mixed_precision` controls
+forward autocast. Supplied configs keep trainable weights and Adam state in FP32,
+use BF16 CUDA autocast, and retain FP32 loss reductions. SaRA rejects BF16 U-Net
+weights because sparse updates require full-precision parameters.
 
 ## 7–9. Config-loading hazards (document or assert)
 

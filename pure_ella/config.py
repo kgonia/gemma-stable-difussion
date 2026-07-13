@@ -71,6 +71,8 @@ class TrainConfig:
     fail_on_prompt_truncation: bool = True
     clip_id: str = "openai/clip-vit-large-patch14"
     sd_checkpoint: str = ""  # path to .safetensors SD checkpoint, empty = use runwayml/stable-diffusion-v1-5
+    model_weight_dtype: Literal["float32", "bfloat16"] = "float32"
+    mixed_precision: Literal["no", "bf16"] = "no"
 
     # --- Connector ---
     connector_type: str = "ella_tsc"  # ella_tsc is the supported baseline
@@ -233,6 +235,18 @@ class TrainConfig:
             raise ValueError("max_gemma_len must be at least clip_anchor_tokens")
         if self.gemma_layer_mix_count < 1:
             raise ValueError("gemma_layer_mix_count must be positive")
+        if self.model_weight_dtype not in {"float32", "bfloat16"}:
+            raise ValueError(
+                "model_weight_dtype must be 'float32' or 'bfloat16'"
+            )
+        if self.mixed_precision not in {"no", "bf16"}:
+            raise ValueError("mixed_precision must be 'no' or 'bf16'")
+        if self.run_sara_phase and self.model_weight_dtype != "float32":
+            raise ValueError(
+                "SaRA requires model_weight_dtype='float32' so sparse U-Net "
+                "updates and optimizer state remain full precision; use "
+                "mixed_precision='bf16' to reduce activation memory"
+            )
         if not 0.0 <= self.conditioning_dropout_prob < 1.0:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")
         caption_mix = (
@@ -253,9 +267,9 @@ class TrainConfig:
         if self.max_image_dimension <= 0:
             raise ValueError("max_image_dimension must be positive")
         for bucket in self.aspect_ratio_buckets:
-            if len(bucket) != 2 or any(int(v) <= 0 or int(v) % 8 for v in bucket):
+            if len(bucket) != 2 or any(int(v) <= 0 or int(v) % 64 for v in bucket):
                 raise ValueError(
-                    f"Invalid aspect-ratio bucket {bucket}; dimensions must be positive multiples of 8"
+                    f"Invalid aspect-ratio bucket {bucket}; dimensions must be positive multiples of 64"
                 )
             if max(map(int, bucket)) > self.max_image_dimension:
                 raise ValueError(
@@ -282,6 +296,10 @@ class TrainConfig:
         print(f"SaRA: {self.run_sara_phase}")
         print(f"Gemma: {self.gemma_id} layer={self.gemma_layer_index}")
         print(f"SD checkpoint: {self.sd_checkpoint}")
+        print(
+            f"Precision: weights={self.model_weight_dtype} "
+            f"autocast={self.mixed_precision}"
+        )
         print(
             f"Datasets: {self.data_sources} batch={self.train_batch_size} "
             f"max_image_dimension={self.max_image_dimension}"

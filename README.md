@@ -43,6 +43,8 @@ Edit `config.json` or pass a custom path. Key settings:
 | `max_gemma_len` | 336 | Input limit with headroom for roughly 256-token captions |
 | `context_tokens` | 77 | Fixed SD1.5 cross-attention contract; output expansion is rejected |
 | `gemma_layer_mix_count` | 4 | Learned mixture of upper Gemma hidden layers |
+| `model_weight_dtype` | `float32` | Parameter and optimizer precision; required for SaRA |
+| `mixed_precision` | `no` (supplied configs: `bf16`) | CUDA forward autocast; keeps trainable parameters in FP32 |
 | `data_sources` | list | Local Parquet files/directories/globs and/or Hugging Face repositories |
 | `max_image_dimension` | 1024 | Maximum long edge before full-frame bucketing |
 | `aspect_ratio_buckets` | nine buckets | 1024-edge full-frame letterbox buckets; no crop or aspect deformation |
@@ -109,7 +111,8 @@ All artifacts land in `output_dir` (default `./output`):
 
 Python ≥ 3.10, managed by [uv](https://docs.astral.sh/uv/):
 
-- `torch` ≥ 2.1, `diffusers` ≥ 0.28, `transformers` ≥ 4.45
+- `torch` ≥ 2.7 from the CUDA 12.8 index, `diffusers` ≥ 0.28,
+  `transformers` ≥ 4.45
 - `datasets` (streaming), `wandb`, `torchvision`, `pillow`, `torchmetrics[image]`
 
 ## Environment variables

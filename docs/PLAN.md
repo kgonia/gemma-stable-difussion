@@ -24,6 +24,11 @@ counterfactual suffix begins after token 77 and is not truncated. Phase 0 uses
 the exact CLIP-visible decoded prefix; Phase 1 samples paired short/medium/long
 captions at 25/25/50 when the dataset supplies them. Gemma encoding performs one
 tokenizer pass per batch, and suffix boundaries fail fast once at startup.
+Phase 1 and SaRA now use one shared diffusion forward/loss function and loop
+driver. Model weight dtype and BF16 forward autocast are explicit configuration
+fields; supplied configs retain FP32 trainable weights and optimizer state while
+using BF16 CUDA activations. Bucket dimensions are validated as multiples of 64,
+and printed step plans include the upper bound from per-bucket tail batches.
 
 ## Vision
 
@@ -65,7 +70,7 @@ guarantee and the ablation story: each pillar is exactly removable.
 - Dataset: multiple local Parquet/Hugging Face locations, streamed round-robin
   into 1024-edge full-frame buckets with masked letterbox padding and optional
   `caption_short`/`caption_medium`/`caption_long` variants.
-- `config_long_256.json` = connector-only long-input baseline, batch 8,
+- `config_long_256.json` = connector-only long-input baseline, batch 1,
   StyleJourney v10; SaRA is deferred to a separate stage.
 
 ---
@@ -85,22 +90,23 @@ suggestions in [`REVIEW.md`](REVIEW.md)), ordered by importance:
    function returns that bogus "HF ID" instead of trying the `~/models/...` fallback,
    and the run dies later with a confusing HF 404. Fix: only treat as HF ID if it
    doesn't look like a filesystem path (no leading `/` or `~`, ≤1 slash).
-3. **Refactor: `run_ella_training` and `run_sara_training` share ~200 duplicated lines**
+3. **Refactor (fixed): `run_ella_training` and `run_sara_training` shared ~200 duplicated lines**
    (the whole teacher-delta forward, loss assembly, logging, validation cadence).
    P3 requires touching the training step; doing it twice in two divergent copies is
-   how bugs get in. Extract a single `diffusion_training_step(state, batch, phase_cfg)`
-   and a shared loop driver before starting P3.
-4. **Minor:** `ClipGeometryLoss()` is re-instantiated every step inside both loops
-   (`train.py:602`, `train.py:882`) — hoist it. SaRA masks are stored at weight dtype
-   (`sara.py:54`), duplicating every target tensor in fp32; store `bool` and cast in the
-   hook. `unet_dtype` is hardcoded `float32` in `main()` — consider a config field
-   (bf16 autocast) before the SaRA phase grows.
+   how bugs get in. Both phases now call `diffusion_training_step` through a
+   shared phase-configured loop driver.
+4. **Minor (fixed):** `ClipGeometryLoss()` is instantiated once per phase. SaRA
+   masks remain bool through their gradient hooks. Model weight dtype and BF16
+   autocast are configured separately; SaRA rejects reduced-precision U-Net
+   weights so sparse updates and Adam state remain FP32.
 5. **Silent-config hazards (fixed):** unknown JSON keys fail fast;
    `context_tokens` is validated as the fixed 77-token SD1.5 output contract; run
    modes no longer overwrite explicit sample or optimizer-step budgets.
 
 **Exit criteria:** SaRA phase respects its own sample budget; one shared training-step
-function; short_train smoke run reproduces current metrics within noise.
+function; short_train smoke run reproduces current metrics within noise. CLIP-prefix
+pretrain, connector-only diffusion, and SaRA have each passed real-image, one-step
+GPU smoke runs; production-length metric validation remains part of P1/P2.
 
 ---
 
@@ -251,4 +257,4 @@ can be composed or ablated by choosing which patches to load, extending the exis
 | Pseudo-labels too noisy → FOV signal ignored | P3 | conditioning dropout + v0 caption-bucket falsifier decides cheaply |
 | Metadata leaks into text semantics (entanglement) | P3 | keep injection global (time-embed), not cross-attn, in v1 |
 | P4 gates open and drag frozen knowledge | P4 | knowledge-preservation hard gate; gate-value logging like `extra_gate_logit` |
-| Compute budget (single-GPU, fp32 UNet) | all | Phase 0 dtype config; gradient checkpointing already on |
+| Compute budget (single GPU) | all | FP32 trainable weights + BF16 autocast; gradient checkpointing already on |

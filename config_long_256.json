@@ -11,6 +11,8 @@
   "use_clip_teacher_delta": false,
   "use_clip_teacher_delta_phase2": false,
   "enable_unet_gradient_checkpointing": true,
+  "model_weight_dtype": "float32",
+  "mixed_precision": "bf16",
   "phase1_semantic_anchor_weight": 0.0,
   "phase2_semantic_anchor_weight": 0.0,
   "context_tokens": 77,

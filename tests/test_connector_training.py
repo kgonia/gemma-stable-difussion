@@ -10,7 +10,14 @@ import torch.nn as nn
 from PIL import Image
 from transformers import BatchEncoding
 
-from train import make_encode_gemma, select_training_captions
+from train import (
+    diffusion_training_step,
+    estimate_steps,
+    make_encode_gemma,
+    resolve_autocast_dtype,
+    resolve_model_weight_dtype,
+    select_training_captions,
+)
 from pure_ella.config import TrainConfig, resolve_sd_checkpoint
 from pure_ella.connector import build_connector
 from pure_ella.dataset import (
@@ -29,6 +36,143 @@ from pure_ella.sara import install_sara_gradient_masks, remove_sara_gradient_mas
 
 
 class ConnectorTrainingTests(unittest.TestCase):
+    def test_precision_config_keeps_sara_weights_full_precision(self):
+        cfg = TrainConfig(
+            model_weight_dtype="float32",
+            mixed_precision="bf16",
+        )
+        self.assertEqual(resolve_model_weight_dtype(cfg), torch.float32)
+
+        with patch("train.torch.cuda.is_bf16_supported", return_value=True):
+            self.assertEqual(
+                resolve_autocast_dtype(cfg, torch.device("cuda")),
+                torch.bfloat16,
+            )
+
+        with self.assertRaisesRegex(ValueError, "mixed_precision"):
+            TrainConfig(mixed_precision="fp16")
+        with self.assertRaisesRegex(ValueError, "SaRA requires"):
+            TrainConfig(
+                experiment_stage="stage3_long_context_with_sara",
+                model_weight_dtype="bfloat16",
+            )
+
+    def test_config_rejects_non_unet_aligned_buckets(self):
+        with self.assertRaisesRegex(ValueError, "multiples of 64"):
+            TrainConfig(aspect_ratio_buckets=[[520, 392]])
+
+    def test_step_plan_accounts_for_per_bucket_tail_batches(self):
+        plan = estimate_steps(
+            max_samples=5,
+            batch_size=2,
+            epochs=1,
+            cap=None,
+            drop_last=False,
+            bucket_count=3,
+        )
+        self.assertEqual(plan.steps_per_epoch, 4)
+        self.assertEqual(plan.effective, 4)
+
+        drop_last_plan = estimate_steps(
+            max_samples=5,
+            batch_size=2,
+            epochs=1,
+            cap=None,
+            drop_last=True,
+            bucket_count=3,
+        )
+        self.assertEqual(drop_last_plan.steps_per_epoch, 2)
+
+    def test_shared_diffusion_step_backpropagates_to_connector(self):
+        class LatentDistribution:
+            def __init__(self, latent):
+                self.latent = latent
+
+            def sample(self):
+                return self.latent
+
+        class VAE(nn.Module):
+            config = SimpleNamespace(scaling_factor=1.0)
+
+            def encode(self, image):
+                extra = torch.zeros_like(image[:, :1])
+                latent = torch.cat([image, extra], dim=1)
+                return SimpleNamespace(
+                    latent_dist=LatentDistribution(latent)
+                )
+
+        class Connector(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.scale = nn.Parameter(torch.tensor(0.25))
+
+            def forward(self, hidden, _timestep, _mask, context_tokens):
+                pooled = hidden.mean(dim=1, keepdim=True) * self.scale
+                return pooled.expand(-1, context_tokens, -1)
+
+        class UNet(nn.Module):
+            def forward(self, noisy, _timestep, encoder_hidden_states):
+                influence = encoder_hidden_states.mean(dim=(1, 2))
+                influence = influence.reshape(-1, 1, 1, 1)
+                return SimpleNamespace(sample=noisy + influence)
+
+        class Scheduler:
+            config = SimpleNamespace(num_train_timesteps=1000)
+
+            @staticmethod
+            def add_noise(latent, noise, _timestep):
+                return latent + noise
+
+        cfg = TrainConfig(
+            context_tokens=4,
+            clip_anchor_tokens=4,
+            max_gemma_len=8,
+            conditioning_dropout_prob=0.0,
+            caption_mix_short=0.0,
+            caption_mix_medium=0.0,
+            caption_mix_long=1.0,
+            lambda_teacher=0.0,
+            lambda_text_delta=0.0,
+            mixed_precision="no",
+        )
+        connector = Connector()
+        state = SimpleNamespace(
+            cfg=cfg,
+            device=torch.device("cpu"),
+            unet_dtype=torch.float32,
+            autocast_dtype=None,
+            vae=VAE(),
+            connector=connector,
+            unet=UNet(),
+            scheduler=Scheduler(),
+            clip_model=None,
+            caption_availability_logged=True,
+            encode_gemma=lambda captions: (
+                torch.ones(len(captions), 3, 4),
+                torch.ones(len(captions), 3, dtype=torch.long),
+            ),
+        )
+        batch = {
+            "image": torch.zeros(1, 3, 8, 8),
+            "image_mask": torch.ones(1, 1, 8, 8),
+            "caption": ["a long caption"],
+        }
+
+        output = diffusion_training_step(
+            state,
+            batch,
+            0,
+            use_teacher_delta=False,
+            semantic_anchor_weight=0.0,
+        )
+        output.loss.backward()
+
+        self.assertTrue(torch.isfinite(output.loss))
+        self.assertEqual(output.loss_teacher.item(), 0.0)
+        self.assertEqual(output.loss_delta.item(), 0.0)
+        self.assertIsNotNone(connector.scale.grad)
+        self.assertNotEqual(connector.scale.grad.item(), 0.0)
+
     def test_tsc_reads_long_input_and_preserves_sd_token_contract(self):
         connector = build_connector(
             "ella_tsc",
