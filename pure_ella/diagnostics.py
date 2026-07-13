@@ -26,6 +26,8 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
+from pure_ella.camera import camera_conditioned_unet, make_camera_condition
+
 
 # ---------------------------------------------------------------------------
 # Final summaries — global dict for unhidden printing
@@ -183,6 +185,7 @@ def generate_ella(
     guidance: float = 5.5,
     seed: int = 777,
     context_tokens: int = None,
+    camera_condition: torch.Tensor = None,
 ) -> Image.Image:
     """Generate an image from the ELLA connector + frozen UNet."""
     connector = state.connector
@@ -210,7 +213,14 @@ def generate_ella(
         h_pair = torch.cat([gh, ugh], dim=0)
         m_pair = torch.cat([gm, ugm], dim=0)
         context = connector(h_pair.to(dtype=unet_dtype), t_batch.to(device), m_pair, context_tokens=ctx)
-        noise_pred = unet(latent_input, t_batch, encoder_hidden_states=context).sample
+        camera_pair = None
+        if camera_condition is not None:
+            camera_single = camera_condition.reshape(1, -1)
+            camera_pair = camera_single.expand(2, -1)
+        noise_pred = camera_conditioned_unet(
+            unet, latent_input, t_batch, encoder_hidden_states=context,
+            camera_condition=camera_pair,
+        ).sample
         noise_cond, noise_uncond = noise_pred.chunk(2)
         noise_pred = noise_uncond + guidance * (noise_cond - noise_uncond)
         latent = scheduler.step(noise_pred, t, latent).prev_sample
@@ -246,7 +256,11 @@ def generate_clip_teacher(prompt: str, state, steps: int = 30, guidance: float =
         latent_input = scheduler.scale_model_input(torch.cat([latent, latent], dim=0), t)
         h_pair = torch.cat([ch, uch], dim=0)
         m_pair = torch.cat([cm, ucm], dim=0)
-        noise_pred = unet(latent_input, t_batch, encoder_hidden_states=h_pair.to(dtype=unet_dtype), encoder_attention_mask=m_pair).sample
+        noise_pred = camera_conditioned_unet(
+            unet, latent_input, t_batch,
+            encoder_hidden_states=h_pair.to(dtype=unet_dtype),
+            encoder_attention_mask=m_pair,
+        ).sample
         noise_cond, noise_uncond = noise_pred.chunk(2)
         noise_pred = noise_uncond + guidance * (noise_cond - noise_uncond)
         latent = scheduler.step(noise_pred, t, latent).prev_sample
@@ -281,7 +295,8 @@ def connector_prompt_sensitivity(prompts: List[str], state, timestep: int = 500,
     for ptxt in prompts:
         gh, gm = encode_gemma([ptxt])
         ctx = connector(gh.to(dtype=unet_dtype), t, gm, context_tokens=cfg.context_tokens)
-        pred = unet(latent, t, encoder_hidden_states=ctx).sample.float()
+        pred = camera_conditioned_unet(
+            unet, latent, t, encoder_hidden_states=ctx).sample.float()
         preds.append(pred)
     base = preds[0].pow(2).mean().sqrt().item() + 1e-8
     vals = []
@@ -327,7 +342,11 @@ def teacher_student_delta_alignment(prompt: str, state, timestep: int = 500, lab
     uch, ucm = encode_clip([""])
     clip_h = torch.cat([ch, uch], dim=0)
     clip_m = torch.cat([cm, ucm], dim=0)
-    teacher = unet(noisy_pair, t_pair, encoder_hidden_states=clip_h.to(dtype=unet_dtype), encoder_attention_mask=clip_m).sample.float()
+    teacher = camera_conditioned_unet(
+        unet, noisy_pair, t_pair,
+        encoder_hidden_states=clip_h.to(dtype=unet_dtype),
+        encoder_attention_mask=clip_m,
+    ).sample.float()
     teacher_cond, teacher_uncond = teacher.chunk(2)
 
     gh, gm = encode_gemma([prompt])
@@ -335,7 +354,8 @@ def teacher_student_delta_alignment(prompt: str, state, timestep: int = 500, lab
     gemma_h = torch.cat([gh, ugh], dim=0)
     gemma_m = torch.cat([gm, ugm], dim=0)
     ctx = connector(gemma_h.to(dtype=unet_dtype), t_pair, gemma_m, context_tokens=cfg.context_tokens)
-    student = unet(noisy_pair, t_pair, encoder_hidden_states=ctx).sample.float()
+    student = camera_conditioned_unet(
+        unet, noisy_pair, t_pair, encoder_hidden_states=ctx).sample.float()
     student_cond, student_uncond = student.chunk(2)
 
     td = (teacher_cond - teacher_uncond).flatten()
@@ -348,6 +368,93 @@ def teacher_student_delta_alignment(prompt: str, state, timestep: int = 500, lab
         summary_prefix=f"diagnostics/{label}", wandb=wandb,
     )
     return {"delta_cos": cos, "norm_ratio": ratio}
+
+
+@torch.no_grad()
+def camera_counterfactual_sensitivity(
+    state, prompt: str = None, label: str = "camera_cf", wandb=None,
+) -> dict:
+    """Measure camera A/B influence on a fixed prompt's CFG delta."""
+    cfg = state.cfg
+    if not cfg.camera_conditioning_enabled:
+        return {}
+    prompt = prompt or cfg.val_prompts[0]
+    connector = state.connector
+    unet = state.unet
+    connector_was_training = connector.training
+    unet_was_training = unet.training
+    connector.eval()
+    unet.eval()
+
+    generator = torch.Generator(device=state.device).manual_seed(cfg.val_seed)
+    latent = torch.randn(
+        1, 4, 64, 64, generator=generator, device=state.device,
+        dtype=state.unet_dtype)
+    noise = torch.randn(
+        latent.shape, generator=generator, device=state.device,
+        dtype=state.unet_dtype)
+    timestep_value = min(
+        cfg.camera_diagnostic_timestep,
+        state.scheduler.config.num_train_timesteps - 1,
+    )
+    timestep = torch.tensor([timestep_value], device=state.device).long()
+    noisy = state.scheduler.add_noise(latent, noise, timestep)
+    noisy_pair = noisy.expand(2, -1, -1, -1)
+    timestep_pair = timestep.expand(2)
+
+    cond_h, cond_mask = state.encode_gemma([prompt])
+    uncond_h, uncond_mask = state.encode_gemma([""])
+    gemma_h = torch.cat((cond_h, uncond_h), dim=0)
+    gemma_mask = torch.cat((cond_mask, uncond_mask), dim=0)
+    context = connector(
+        gemma_h.to(dtype=state.unet_dtype), timestep_pair, gemma_mask,
+        context_tokens=cfg.context_tokens)
+
+    def evaluate(name: str, field_name: str,
+                 value_a: float, value_b: float):
+        conditions = []
+        for value in (value_a, value_b):
+            single = make_camera_condition(
+                **{field_name: value}, capture_type="photo").to(state.device)
+            conditions.append(single.reshape(1, -1).expand(2, -1))
+        predictions = [
+            camera_conditioned_unet(
+                unet, noisy_pair, timestep_pair,
+                encoder_hidden_states=context, camera_condition=condition,
+            ).sample.float()
+            for condition in conditions
+        ]
+        delta_a = predictions[0][0:1] - predictions[0][1:2]
+        delta_b = predictions[1][0:1] - predictions[1][1:2]
+        sensitivity = _rel_diff(delta_a, delta_b)
+        prediction_rel_diff = _rel_diff(predictions[0], predictions[1])
+        print(
+            f"[{label}] {name} {value_a:g} vs {value_b:g}: "
+            f"CFG-delta rel_diff={sensitivity:.6f}"
+        )
+        return {
+            f"{name}_cfg_delta_relative_diff": sensitivity,
+            f"{name}_prediction_relative_diff": prediction_rel_diff,
+            f"{name}_a": value_a,
+            f"{name}_b": value_b,
+        }
+
+    observed_fov = bool(
+        getattr(state, "camera_presence_counts", [0])[0])
+    metrics = {}
+    if cfg.camera_run_fov_counterfactual or observed_fov:
+        metrics.update(evaluate(
+            "fov", "vertical_fov_deg", cfg.camera_counterfactual_fov_a,
+            cfg.camera_counterfactual_fov_b))
+    else:
+        print(f"[{label}] FOV counterfactual skipped: no observed FOV labels")
+    metrics.update(evaluate(
+        "focal", "focal_length_mm", cfg.camera_counterfactual_focal_a,
+        cfg.camera_counterfactual_focal_b))
+    _log_metrics(f"camera_sensitivity/{label}", metrics, wandb=wandb)
+    connector.train(connector_was_training)
+    unet.train(unet_was_training)
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +486,11 @@ def fixed_overfit_loss(state, label: str = "fixed_overfit", timestep: int = 500,
     noisy = scheduler.add_noise(latent, noise, t)
     gh, gm = encode_gemma(captions)
     ctx = connector(gh.to(dtype=unet_dtype), t, gm, context_tokens=cfg.context_tokens)
-    pred = unet(noisy, t, encoder_hidden_states=ctx).sample
+    camera_condition = batch.get("camera_condition")
+    pred = camera_conditioned_unet(
+        unet, noisy, t, encoder_hidden_states=ctx,
+        camera_condition=camera_condition,
+    ).sample
     if image_mask is None:
         loss = F.mse_loss(pred.float(), noise.float()).item()
     else:
@@ -644,9 +755,12 @@ def suffix_counterfactual_sensitivity(
         ctx_b_c = connector(gh_b.to(dtype=unet_dtype), t, gm_b, context_tokens=ctx)
         
         # UNet predictions
-        pred_a_c = unet(noisy, t, encoder_hidden_states=ctx_a_c).sample.float()
-        pred_u = unet(noisy, t, encoder_hidden_states=ctx_u).sample.float()
-        pred_b_c = unet(noisy, t, encoder_hidden_states=ctx_b_c).sample.float()
+        pred_a_c = camera_conditioned_unet(
+            unet, noisy, t, encoder_hidden_states=ctx_a_c).sample.float()
+        pred_u = camera_conditioned_unet(
+            unet, noisy, t, encoder_hidden_states=ctx_u).sample.float()
+        pred_b_c = camera_conditioned_unet(
+            unet, noisy, t, encoder_hidden_states=ctx_b_c).sample.float()
         
         delta_a = pred_a_c - pred_u
         delta_b = pred_b_c - pred_u

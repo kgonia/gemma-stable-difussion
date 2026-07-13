@@ -30,6 +30,20 @@ fields; supplied configs retain FP32 trainable weights and optimizer state while
 using BF16 CUDA activations. Bucket dimensions are validated as multiples of 64,
 and printed step plans include the upper bound from per-bucket tail batches.
 
+P3 camera conditioning is implemented behind `camera_conditioning_enabled`.
+It adds a Fourier/MLP class-embedding branch to the UNet timestep embedding,
+with an exactly zero-initialized final projection, 40% record-level metadata
+dropout, EXIF missingness bits, a learned unknown/capture-type embedding, and a
+frozen text connector by default. `upstream_json.exif` from the Unsplash smoke
+dataset supplies focal length, aperture, and ISO. Vertical FOV is accepted
+directly or derived only from a 35 mm-equivalent focal length; raw focal length
+is retained as a separately marked fallback because sensor size is unavailable.
+P3 artifacts, strict reload, fixed-seed focal/FOV counterfactual metrics, and A/B
+generation grids are included. FOV sweeps stay disabled until FOV labels are
+observed (or explicitly overridden), preventing an untrained input channel from
+being reported as control. `config_camera_p3.json` is the P3 run template
+and requires the P1 artifact configured by `init_connector_ckpt_path`.
+
 ## Vision
 
 Four capability pillars, in dependency order:
@@ -181,10 +195,12 @@ Two injection points, in order of preference:
 have no EXIF, and (b) it enables metadata-CFG later. This is the FINO framing: metadata
 guides representation learning; it must not become a hard dependency.
 
-### The data problem (blocking — resolve before writing model code)
+### Data status
 
-`jackyhate/text-to-image-2M` is largely **synthetic imagery — there is no real camera
-EXIF to harvest**. Options, not mutually exclusive:
+The first P3 smoke dataset contains EXIF under `upstream_json.exif`; the loader
+now extracts it. It does not contain sensor height, so raw focal length is never
+misrepresented as physical FOV. For larger synthetic sources, the remaining
+options are:
 
 - **Pseudo-labeling (recommended default):** run a camera-intrinsics estimator
   (Metric3D-style canonical-camera reasoning; e.g. a WildCamera/GeoCalib-class model)
@@ -200,13 +216,13 @@ EXIF to harvest**. Options, not mutually exclusive:
 
 ### Plan of record
 
-1. v0 falsifier: caption-derived FOV buckets, timestep-embedding injection, zero-init,
-   dropout 0.4, short_train. **Success test:** same prompt + seed, sweep the FOV input →
-   monotonic, visible perspective/framing change; short-prompt FID unchanged.
-2. v1: pseudo-labeled continuous FOV on the full stream; add a `fov_counterfactual`
-   diagnostic mirroring `suffix_counterfactual_sensitivity` (same prompt, FOV A vs B,
-   rel-diff on CFG delta) so the existing diagnostics culture covers the new signal.
-3. v2 (only if v1 works): add aperture/ISO channels; optionally metadata tokens.
+1. v0 implemented: EXIF focal/aperture/ISO plus trusted FOV, timestep-embedding
+   injection, zero-init, dropout 0.4, and fixed-seed FOV counterfactuals.
+   **Success test:** same prompt + seed, sweep the FOV input -> monotonic, visible
+   perspective/framing change; short-prompt FID unchanged.
+2. v1: add continuous FOV pseudo-labels for records lacking trustworthy intrinsics;
+   compare against the implemented EXIF-only baseline.
+3. v2 (only if v1 works): evaluate metadata tokens if global conditioning saturates.
 
 **Exit criteria:** FOV counterfactual sensitivity above threshold; generation with
 "unknown" metadata identical-quality to B0; sweep grids show controlled perspective.

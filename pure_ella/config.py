@@ -133,6 +133,21 @@ class TrainConfig:
     caption_mix_long: float = 0.50
     conditioning_dropout_prob: float = 0.1
 
+    # --- P3 camera metadata conditioning ---
+    camera_conditioning_enabled: bool = False
+    camera_train_connector: bool = False
+    camera_metadata_dropout_prob: float = 0.4
+    camera_lr: float = 1e-4
+    camera_hidden_dim: int = 512
+    camera_fourier_bands: int = 6
+    run_camera_counterfactual_diagnostics: bool = True
+    camera_run_fov_counterfactual: bool = False
+    camera_counterfactual_fov_a: float = 35.0
+    camera_counterfactual_fov_b: float = 90.0
+    camera_counterfactual_focal_a: float = 24.0
+    camera_counterfactual_focal_b: float = 85.0
+    camera_diagnostic_timestep: int = 500
+
     # --- Quality metrics ---
     run_image_quality_metrics: bool = True
     run_fid: bool = True
@@ -255,6 +270,20 @@ class TrainConfig:
             )
         if not 0.0 <= self.conditioning_dropout_prob < 1.0:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")
+        if not 0.0 <= self.camera_metadata_dropout_prob < 1.0:
+            raise ValueError("camera_metadata_dropout_prob must be in [0, 1)")
+        if self.camera_hidden_dim <= 0 or self.camera_fourier_bands <= 0:
+            raise ValueError("camera conditioner dimensions must be positive")
+        if self.camera_lr <= 0:
+            raise ValueError("camera_lr must be positive")
+        if not (0 < self.camera_counterfactual_fov_a <= 180
+                and 0 < self.camera_counterfactual_fov_b <= 180):
+            raise ValueError("camera counterfactual FOV values must be in (0, 180]")
+        if not (self.camera_counterfactual_focal_a > 0
+                and self.camera_counterfactual_focal_b > 0):
+            raise ValueError("camera counterfactual focal lengths must be positive")
+        if self.camera_diagnostic_timestep < 0:
+            raise ValueError("camera_diagnostic_timestep must be non-negative")
         if self.sara_selection_mode not in {
             "magnitude_threshold", "target_fraction"
         }:
@@ -346,6 +375,11 @@ class TrainConfig:
         print(
             f"Datasets: {self.data_sources} batch={self.train_batch_size} "
             f"max_image_dimension={self.max_image_dimension}"
+        )
+        print(
+            f"Camera conditioning: {self.camera_conditioning_enabled} "
+            f"dropout={self.camera_metadata_dropout_prob} "
+            f"train_connector={self.camera_train_connector}"
         )
         print(f"Output: {self.output_dir}")
 

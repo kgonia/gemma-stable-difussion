@@ -41,6 +41,13 @@ from transformers import AutoModel, AutoTokenizer, CLIPTextModel, CLIPTokenizer
 # Local modules
 from pure_ella.config import TrainConfig, resolve_sd_checkpoint, seed_everything
 from pure_ella.connector import build_connector
+from pure_ella.camera import (
+    CameraConditioner,
+    apply_camera_dropout,
+    camera_conditioned_unet,
+    install_camera_conditioner,
+    make_camera_condition,
+)
 from pure_ella.dataset import make_streaming_dataloader
 from pure_ella.sara import (
     build_sara_attn2_kv_sparse_masks,
@@ -69,6 +76,7 @@ from pure_ella.diagnostics import (
     _rel_diff,
     _to_float_maybe,
     suffix_counterfactual_sensitivity,
+    camera_counterfactual_sensitivity,
     validate_suffix_counterfactual_token_boundaries,
     generate_case_image,
     save_complex_case_grid,
@@ -98,11 +106,16 @@ class TrainingState:
     scheduler: Any = None
     inf_scheduler: Any = None
     connector: nn.Module = None
+    camera_conditioner: nn.Module = None
 
     # Dataset
     overfit_eval_batch: dict = None
     ref_quality_cache: dict = None
     caption_availability_logged: bool = False
+    camera_metadata_logged: bool = False
+    camera_metadata_samples: int = 0
+    camera_presence_counts: list = field(
+        default_factory=lambda: [0, 0, 0, 0])
     gemma_prompt_max_observed: int = -1
     gemma_truncated_prompt_count: int = 0
     suffix_token_boundary_signature: tuple = None
@@ -442,6 +455,28 @@ def build_ella_connector(state: TrainingState):
         print("extra_token_gate:", torch.sigmoid(eg).item())
 
 
+def build_camera_conditioner(state: TrainingState):
+    """Install P3 as an additive SD timestep-embedding condition."""
+    if not state.cfg.camera_conditioning_enabled:
+        return
+    time_embed_dim = state.unet.time_embedding.linear_2.out_features
+    state.camera_conditioner = CameraConditioner(
+        output_dim=time_embed_dim,
+        hidden_dim=state.cfg.camera_hidden_dim,
+        fourier_bands=state.cfg.camera_fourier_bands,
+    ).to(device=state.device, dtype=state.unet_dtype)
+    install_camera_conditioner(state.unet, state.camera_conditioner)
+    with torch.no_grad():
+        unknown = state.camera_conditioner.unknown(2, state.device)
+        output = state.camera_conditioner(unknown)
+        assert torch.count_nonzero(output).item() == 0
+    count = sum(p.numel() for p in state.camera_conditioner.parameters())
+    print(
+        f"P3 camera conditioner PASS: output={time_embed_dim} params={count:,} "
+        "zero-init identity=PASS"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Encoding helpers
 # ---------------------------------------------------------------------------
@@ -701,6 +736,11 @@ def run_clip_pretrain(state: TrainingState):
     torch.save({
         "connector_state_dict": {k: v.detach().cpu()
                                  for k, v in state.connector.state_dict().items()},
+        "camera_conditioner_state_dict": (
+            {k: v.detach().cpu() for k, v in
+             state.camera_conditioner.state_dict().items()}
+            if state.camera_conditioner is not None else None
+        ),
         "config": cfg.to_dict(),
         "stage": "clip_alignment_pretrain",
     }, ckpt_path)
@@ -748,6 +788,28 @@ def diffusion_training_step(
     image_mask = batch.get("image_mask")
     if image_mask is not None:
         image_mask = image_mask.to(device=state.device)
+    camera_condition = None
+    if cfg.camera_conditioning_enabled:
+        raw_camera_condition = batch["camera_condition"]
+        present = raw_camera_condition[:, 4:8].sum(dim=0).tolist()
+        state.camera_metadata_samples += raw_camera_condition.shape[0]
+        state.camera_presence_counts = [
+            old + int(new)
+            for old, new in zip(state.camera_presence_counts, present)
+        ]
+        if not state.camera_metadata_logged:
+            print(
+                "Camera metadata in first batch: "
+                f"fov={int(present[0])}/{len(captions)} "
+                f"focal={int(present[1])}/{len(captions)} "
+                f"aperture={int(present[2])}/{len(captions)} "
+                f"iso={int(present[3])}/{len(captions)}"
+            )
+            state.camera_metadata_logged = True
+        camera_condition = raw_camera_condition.to(
+            device=state.device, dtype=torch.float32)
+        camera_condition = apply_camera_dropout(
+            camera_condition, cfg.camera_metadata_dropout_prob)
 
     with torch.no_grad():
         with model_autocast(state):
@@ -784,10 +846,15 @@ def diffusion_training_step(
                 mask_pair,
                 context_tokens=cfg.context_tokens,
             )
-            student_pair = state.unet(
+            camera_pair = torch.cat(
+                [camera_condition, camera_condition], dim=0
+            ) if camera_condition is not None else None
+            student_pair = camera_conditioned_unet(
+                state.unet,
                 noisy_pair,
                 timestep_pair,
                 encoder_hidden_states=context,
+                camera_condition=camera_pair,
             ).sample
             student_cond, student_uncond = student_pair.chunk(2)
             loss_diff = masked_mse(student_cond, noise, image_mask)
@@ -799,13 +866,15 @@ def diffusion_training_step(
                 clip_mask_pair = torch.cat(
                     [clip_mask, uncond_clip_mask], dim=0
                 )
-                teacher_pair = state.unet(
+                teacher_pair = camera_conditioned_unet(
+                    state.unet,
                     noisy_pair,
                     timestep_pair,
                     encoder_hidden_states=clip_pair.to(
                         dtype=state.unet_dtype
                     ),
                     encoder_attention_mask=clip_mask_pair,
+                    camera_condition=camera_pair,
                 ).sample.detach()
                 teacher_cond, teacher_uncond = teacher_pair.chunk(2)
                 teacher_delta = teacher_cond - teacher_uncond
@@ -823,10 +892,12 @@ def diffusion_training_step(
                 gemma_mask,
                 context_tokens=cfg.context_tokens,
             )
-            student_cond = state.unet(
+            student_cond = camera_conditioned_unet(
+                state.unet,
                 noisy,
                 timestep,
                 encoder_hidden_states=context,
+                camera_condition=camera_condition,
             ).sample
             loss_diff = masked_mse(student_cond, noise, image_mask)
 
@@ -891,6 +962,10 @@ def _run_periodic_training_validation(
         suffix_counterfactual_sensitivity(
             state, label=label, wandb=state.wandb
         )
+    if (cfg.camera_conditioning_enabled
+            and cfg.run_camera_counterfactual_diagnostics):
+        camera_counterfactual_sensitivity(
+            state, label=label, wandb=state.wandb)
     if (
         cfg.generation_grid_every_opt_steps > 0
         and opt_step % cfg.generation_grid_every_opt_steps == 0
@@ -929,6 +1004,9 @@ def run_diffusion_training_loop(
     last_metrics = {}
     stop = False
     started = time.time()
+    if cfg.camera_conditioning_enabled:
+        state.camera_metadata_samples = 0
+        state.camera_presence_counts = [0, 0, 0, 0]
 
     for epoch in range(spec.epochs):
         dataloader = make_streaming_dataloader(
@@ -1001,7 +1079,7 @@ def run_diffusion_training_loop(
 
     elapsed_min = (time.time() - started) / 60
     log_vram(f"{spec.name}_end", opt_step, state)
-    return {
+    summary = {
         "steps": opt_step,
         "best_loss": best if best is not None else float("nan"),
         "elapsed_min": elapsed_min,
@@ -1013,6 +1091,14 @@ def run_diffusion_training_loop(
         "final_loss_delta": last_metrics.get("loss_delta", float("nan")),
         "final_loss_anchor": last_metrics.get("loss_anchor", float("nan")),
     }
+    if cfg.camera_conditioning_enabled and state.camera_metadata_samples:
+        for name, count in zip(
+            ("fov", "focal", "aperture", "iso"),
+            state.camera_presence_counts,
+        ):
+            summary[f"camera_{name}_coverage"] = (
+                count / state.camera_metadata_samples)
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1034,19 +1120,40 @@ def run_ella_training(state: TrainingState):
         for p in state.clip_model.parameters():
             p.requires_grad_(False)
     for p in state.connector.parameters():
-        p.requires_grad_(True)
+        p.requires_grad_(
+            not cfg.camera_conditioning_enabled or cfg.camera_train_connector)
+    if state.camera_conditioner is not None:
+        for p in state.camera_conditioner.parameters():
+            p.requires_grad_(True)
 
-    trainable_params = [
+    trainable_connector = [
         parameter
         for parameter in state.connector.parameters()
         if parameter.requires_grad
     ]
-
-    optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=cfg.ella_lr,
-        weight_decay=0.01,
-        eps=1e-6,
+    trainable_camera = (
+        list(state.camera_conditioner.parameters())
+        if state.camera_conditioner is not None else []
+    )
+    trainable_params = trainable_connector + trainable_camera
+    optimizer_groups = []
+    if trainable_connector:
+        optimizer_groups.append({
+            "params": trainable_connector,
+            "lr": cfg.ella_lr,
+            "weight_decay": 0.01,
+        })
+    if trainable_camera:
+        optimizer_groups.append({
+            "params": trainable_camera,
+            "lr": cfg.camera_lr,
+            "weight_decay": 0.01,
+        })
+    optimizer = torch.optim.AdamW(optimizer_groups, eps=1e-6)
+    print(
+        f"Phase 1 trainable params: connector="
+        f"{sum(p.numel() for p in trainable_connector):,} camera="
+        f"{sum(p.numel() for p in trainable_camera):,}"
     )
     use_teacher_delta = bool(
         cfg.use_clip_teacher_delta
@@ -1058,8 +1165,10 @@ def run_ella_training(state: TrainingState):
         "paired_cfg_teacher" if use_teacher_delta else "conditional_only",
     )
 
-    state.connector.train()
     state.unet.eval()
+    state.connector.train()
+    if state.camera_conditioner is not None:
+        state.camera_conditioner.train()
     state.vae.eval()
     state.gemma_model.eval()
     if state.clip_model is not None:
@@ -1097,6 +1206,11 @@ def run_ella_training(state: TrainingState):
     torch.save({
         "connector_state_dict": {k: v.detach().cpu()
                                  for k, v in state.connector.state_dict().items()},
+        "camera_conditioner_state_dict": (
+            {k: v.detach().cpu() for k, v in
+             state.camera_conditioner.state_dict().items()}
+            if state.camera_conditioner is not None else None
+        ),
         "config": cfg.to_dict(),
         "stage": "ella_frozen_unet",
     }, ckpt_path)
@@ -1132,23 +1246,50 @@ def run_sara_training(state: TrainingState):
     initial_sparse_values = capture_sara_selected_values(state.unet)
     grad_handles = install_sara_gradient_masks(state.unet)
 
-    # Connector stays trainable
+    # Keep P3 additive when configured: camera trains, connector can stay frozen.
     for p in state.connector.parameters():
-        p.requires_grad_(True)
+        p.requires_grad_(
+            not cfg.camera_conditioning_enabled or cfg.camera_train_connector)
+    if state.camera_conditioner is not None:
+        for p in state.camera_conditioner.parameters():
+            p.requires_grad_(True)
     trainable_connector = [p for p in state.connector.parameters() if p.requires_grad]
-    trainable_unet = [p for p in state.unet.parameters() if p.requires_grad]
-    trainable_params = trainable_connector + trainable_unet
+    camera_ids = {
+        id(p) for p in state.camera_conditioner.parameters()
+    } if state.camera_conditioner is not None else set()
+    trainable_camera = (
+        list(state.camera_conditioner.parameters())
+        if state.camera_conditioner is not None else []
+    )
+    trainable_unet = [
+        p for p in state.unet.parameters()
+        if p.requires_grad and id(p) not in camera_ids
+    ]
+    trainable_params = trainable_connector + trainable_camera + trainable_unet
     print(f"Trainable params in ELLA+SaRA: {sum(p.numel() for p in trainable_params):,}")
     print(f"  connector: {sum(p.numel() for p in trainable_connector):,}")
+    print(f"  camera: {sum(p.numel() for p in trainable_camera):,}")
     print(
         f"  masked UNet tensors: {sum(p.numel() for p in trainable_unet):,} "
         f"({sara_summary['selected']:,} selected entries)"
     )
 
-    optimizer = torch.optim.AdamW([
-        {"params": trainable_connector, "weight_decay": 0.01},
-        {"params": trainable_unet, "weight_decay": 0.0},
-    ], lr=cfg.sara_lr, eps=1e-6)
+    optimizer_groups = []
+    if trainable_connector:
+        optimizer_groups.append({
+            "params": trainable_connector, "lr": cfg.sara_lr,
+            "weight_decay": 0.01,
+        })
+    if trainable_camera:
+        optimizer_groups.append({
+            "params": trainable_camera, "lr": cfg.camera_lr,
+            "weight_decay": 0.01,
+        })
+    optimizer_groups.append({
+        "params": trainable_unet, "lr": cfg.sara_lr,
+        "weight_decay": 0.0,
+    })
+    optimizer = torch.optim.AdamW(optimizer_groups, eps=1e-6)
 
     use_teacher_delta_phase2 = bool(
         cfg.use_clip_teacher_delta and cfg.use_clip_teacher_delta_phase2
@@ -1266,6 +1407,14 @@ def run_validation_grids(state: TrainingState):
                        if isinstance(final_delta, dict) else float("nan")),
         "fixed_overfit_mse": final_overfit,
     }
+    if (cfg.camera_conditioning_enabled
+            and cfg.run_camera_counterfactual_diagnostics):
+        camera_metrics = camera_counterfactual_sensitivity(
+            state, label="final_camera", wandb=state.wandb)
+        fev_summary.update({
+            f"camera_{key}": value
+            for key, value in camera_metrics.items()
+        })
     remember_final_summary(
         "final_eval", fev_summary,
         wandb_prefix="final/eval", wandb=state.wandb)
@@ -1302,6 +1451,42 @@ def run_validation_grids(state: TrainingState):
             wandb_prefix="final/eval", wandb=state.wandb)
         print_final_summary("final_eval")
 
+        if cfg.camera_conditioning_enabled:
+            camera_images = []
+            camera_labels = []
+            camera_cases = []
+            observed_fov = bool(state.camera_presence_counts[0])
+            if cfg.camera_run_fov_counterfactual or observed_fov:
+                camera_cases.append((
+                    "vertical FOV", "vertical_fov_deg",
+                    cfg.camera_counterfactual_fov_a,
+                    cfg.camera_counterfactual_fov_b,
+                ))
+            camera_cases.append((
+                "focal length", "focal_length_mm",
+                cfg.camera_counterfactual_focal_a,
+                cfg.camera_counterfactual_focal_b,
+            ))
+            for case_name, field_name, value_a, value_b in camera_cases:
+                for value in (value_a, value_b):
+                    condition = make_camera_condition(
+                        **{field_name: value}, capture_type="photo")
+                    camera_images.append(generate_ella(
+                        cfg.val_prompts[0], state, steps=cfg.val_steps,
+                        guidance=cfg.val_guidance, seed=cfg.val_seed,
+                        camera_condition=condition,
+                    ))
+                    camera_labels.append(f"{case_name} {value:g}")
+            camera_grid_path = (
+                f"{cfg.output_dir}/validation_camera_counterfactual.png")
+            save_validation_grid(
+                camera_images, camera_labels, camera_grid_path,
+                "P3 camera counterfactuals")
+            fev_summary["camera_grid_saved"] = camera_grid_path
+            remember_final_summary(
+                "final_eval", fev_summary,
+                wandb_prefix="final/eval", wandb=state.wandb)
+
         if state.clip_model is not None:
             clip_imgs, clip_labels = [], []
             for ptxt in cfg.val_prompts:
@@ -1326,12 +1511,34 @@ def run_save_artifacts(state: TrainingState):
         "connector_type": cfg.connector_type,
         "connector_state_dict": {k: v.detach().cpu()
                                  for k, v in state.connector.state_dict().items()},
+        "camera_conditioner_state_dict": (
+            {k: v.detach().cpu() for k, v in
+             state.camera_conditioner.state_dict().items()}
+            if state.camera_conditioner is not None else None
+        ),
         "gemma_model_id": cfg.gemma_id,
         "sd_checkpoint": cfg.sd_checkpoint,
         "run_config": cfg.to_dict(),
     }, path)
     print("Connector saved:", path)
     summary = {"connector_saved": path, "context_tokens": cfg.context_tokens}
+
+    if state.camera_conditioner is not None:
+        camera_path = f"{cfg.output_dir}/pure_ella_camera_conditioner.pt"
+        torch.save({
+            "architecture": "zero-init camera timestep conditioning",
+            "camera_conditioner_state_dict": {
+                k: v.detach().cpu()
+                for k, v in state.camera_conditioner.state_dict().items()
+            },
+            "condition_schema": (
+                "normalized[fov,focal,aperture,iso], "
+                "present[fov,focal,aperture,iso], capture_type_id"
+            ),
+            "run_config": cfg.to_dict(),
+        }, camera_path)
+        print("Camera conditioner saved:", camera_path)
+        summary["camera_conditioner_saved"] = camera_path
 
     # Save SaRA sparse UNet patch if active
     if cfg.run_sara_phase and state._sara_summary is not None:
@@ -1404,6 +1611,33 @@ def run_reload_proof(state: TrainingState):
             token=os.environ.get("HF_TOKEN"),
         ).to(state.device).eval()
 
+    reloaded_camera = None
+    if cfg.camera_conditioning_enabled:
+        camera_path = f"{cfg.output_dir}/pure_ella_camera_conditioner.pt"
+        camera_ckpt = torch.load(
+            camera_path, map_location="cpu", weights_only=True)
+        reloaded_camera = CameraConditioner(
+            output_dim=reloaded_unet.time_embedding.linear_2.out_features,
+            hidden_dim=cfg.camera_hidden_dim,
+            fourier_bands=cfg.camera_fourier_bands,
+        ).to(device=state.device, dtype=state.unet_dtype)
+        reloaded_camera.load_state_dict(
+            camera_ckpt["camera_conditioner_state_dict"], strict=True)
+        install_camera_conditioner(reloaded_unet, reloaded_camera)
+        reloaded_camera.eval()
+        proof_conditions = torch.stack((
+            make_camera_condition(capture_type="unknown"),
+            make_camera_condition(
+                focal_length_mm=cfg.camera_counterfactual_focal_a,
+                capture_type="photo"),
+        )).to(state.device)
+        with torch.no_grad():
+            live_camera_output = state.camera_conditioner(proof_conditions)
+            reloaded_camera_output = reloaded_camera(proof_conditions)
+        if not torch.equal(live_camera_output, reloaded_camera_output):
+            raise RuntimeError("Reloaded camera conditioner output mismatch")
+        print("Camera conditioner strict reload PASS")
+
     # Apply SaRA sparse UNet patch if saved
     sparse_path = f"{cfg.output_dir}/pure_ella_unet_attn2_kv_sparse_L{cfg.context_tokens}.pt"
     if cfg.run_sara_phase and os.path.exists(sparse_path):
@@ -1418,11 +1652,14 @@ def run_reload_proof(state: TrainingState):
                         context_tokens=cfg.context_tokens)
         test_latent = torch.randn(
             2, 4, 64, 64, device=state.device, dtype=state.unet_dtype)
-        pred = reloaded_unet(test_latent, t, encoder_hidden_states=ctx).sample
+        pred = camera_conditioned_unet(
+            reloaded_unet, test_latent, t, encoder_hidden_states=ctx).sample
         assert torch.isfinite(pred).all()
     print("Fresh reload finite forward PASS")
     reload_summary = {
         "strict_connector_reload": 1.0,
+        "strict_camera_reload": (
+            1.0 if cfg.camera_conditioning_enabled else None),
         "finite_forward": 1.0,
         "context_tokens": cfg.context_tokens,
     }
@@ -1433,8 +1670,10 @@ def run_reload_proof(state: TrainingState):
 
     old_connector = state.connector
     old_unet = state.unet
+    old_camera = state.camera_conditioner
     state.connector = reloaded
     state.unet = reloaded_unet
+    state.camera_conditioner = reloaded_camera
     if state.clip_model is not None:
         del state.clip_model
         del state.clip_tokenizer
@@ -1467,6 +1706,7 @@ def run_reload_proof(state: TrainingState):
     finally:
         state.connector = old_connector
         state.unet = old_unet
+        state.camera_conditioner = old_camera
         if 'reloaded' in locals():
             del reloaded
         if 'reloaded_unet' in locals():
@@ -1536,7 +1776,7 @@ def run_complex_prompt_checks(state: TrainingState):
 # Main
 # ---------------------------------------------------------------------------
 def _load_connector_checkpoint(state: TrainingState, ckpt_path: str):
-    """Load a connector checkpoint saved by run_clip_pretrain."""
+    """Load connector and optional P3 state from a training checkpoint."""
     if not ckpt_path or not os.path.exists(ckpt_path):
         print(f"Checkpoint not found: {ckpt_path}")
         return False
@@ -1557,6 +1797,10 @@ def _load_connector_checkpoint(state: TrainingState, ckpt_path: str):
         print(f"WARNING: unexpected keys ({len(unexpected)}): {unexpected[:5]}…")
     stage = ckpt.get("stage", "unknown")
     print(f"Loaded connector from {ckpt_path} (stage={stage}, strict={strict})")
+    camera_sd = ckpt.get("camera_conditioner_state_dict")
+    if state.camera_conditioner is not None and camera_sd:
+        state.camera_conditioner.load_state_dict(camera_sd, strict=True)
+        print("Loaded camera conditioner from the same checkpoint")
     return True
 
 
@@ -1588,6 +1832,34 @@ def main():
 
     cfg = TrainConfig.from_json(config_path)
     seed_everything(cfg.base_seed)
+
+    resume_path = args.resume_ckpt or cfg.init_connector_ckpt_path
+    pretrain_will_run = (
+        "pretrain" in phases_requested
+        and cfg.run_clip_alignment_pretrain
+        and cfg.run_training
+        and cfg.pretrain_epochs > 0
+    )
+    p3_frozen_connector_training = (
+        cfg.camera_conditioning_enabled
+        and not cfg.camera_train_connector
+        and bool({"ella", "sara"} & phases_requested)
+    )
+    if p3_frozen_connector_training and pretrain_will_run:
+        print(
+            "ERROR: P3 with camera_train_connector=false cannot run connector "
+            "pretraining; disable run_clip_alignment_pretrain and resume P1"
+        )
+        sys.exit(1)
+    if p3_frozen_connector_training and not resume_path:
+        print(
+            "ERROR: P3 freezes the text connector by default and requires "
+            "--resume-ckpt or init_connector_ckpt_path from a completed P1 run"
+        )
+        sys.exit(1)
+    if resume_path and not pretrain_will_run and not os.path.isfile(resume_path):
+        print(f"ERROR: connector checkpoint not found: {resume_path}")
+        sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     unet_dtype = resolve_model_weight_dtype(cfg)
@@ -1636,6 +1908,7 @@ def main():
             or cfg.phase2_semantic_anchor_weight > 0):
         load_clip(state)
     load_stylejourney(state)
+    build_camera_conditioner(state)
     state.encode_gemma = make_encode_gemma(state)
     if state.clip_model is not None:
         state.encode_clip = make_encode_clip(state)
@@ -1657,6 +1930,7 @@ def main():
             "image": batch["image"],
             "image_mask": batch["image_mask"],
             "caption": _as_prompt_list(batch["caption"]),
+            "camera_condition": batch["camera_condition"],
         }
         print("Exact overfit captions:")
         for i, p in enumerate(state.overfit_eval_batch["caption"]):
@@ -1665,8 +1939,7 @@ def main():
         print("Non-overfit run: generic validation prompts active")
 
     # ── resume / phase selection ──
-    resume_path = args.resume_ckpt or cfg.init_connector_ckpt_path
-    if "pretrain" not in phases_requested:
+    if not pretrain_will_run:
         if resume_path:
             if not _load_connector_checkpoint(state, resume_path):
                 print("ERROR: failed to load resume checkpoint, aborting")

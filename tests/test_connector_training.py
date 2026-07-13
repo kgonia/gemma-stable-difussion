@@ -20,6 +20,16 @@ from train import (
     select_training_captions,
 )
 from pure_ella.config import TrainConfig, resolve_sd_checkpoint
+from pure_ella.camera import (
+    CAMERA_CONDITION_DIM,
+    CameraConditioner,
+    apply_camera_dropout,
+    camera_conditioned_unet,
+    camera_metadata_to_tensor,
+    extract_camera_metadata,
+    install_camera_conditioner,
+    make_camera_condition,
+)
 from pure_ella.connector import build_connector
 from pure_ella.dataset import (
     BucketBatchDataset,
@@ -43,6 +53,119 @@ from pure_ella.sara import (
 
 
 class ConnectorTrainingTests(unittest.TestCase):
+    def test_camera_metadata_extracts_nested_unsplash_exif(self):
+        sample = {
+            "upstream_json": json.dumps({
+                "exif": {
+                    "focal_length": "45.0",
+                    "aperture_value": "5.0",
+                    "iso": "200.0",
+                }
+            }),
+            "caption_detailed": "a mountain photograph",
+        }
+
+        metadata = extract_camera_metadata(sample)
+        condition = camera_metadata_to_tensor(metadata)
+
+        self.assertEqual(metadata["capture_type"], "photo")
+        self.assertIsNone(metadata["vertical_fov_deg"])
+        self.assertEqual(metadata["focal_length_mm"], 45.0)
+        self.assertEqual(metadata["aperture_f_number"], 5.0)
+        self.assertEqual(metadata["iso"], 200.0)
+        self.assertEqual(tuple(condition.shape), (CAMERA_CONDITION_DIM,))
+        self.assertEqual(condition[4:8].tolist(), [0.0, 1.0, 1.0, 1.0])
+        self.assertEqual(condition[-1].item(), 1.0)
+
+    def test_35mm_equivalent_is_safely_converted_to_vertical_fov(self):
+        metadata = extract_camera_metadata({
+            "metadata": {"focal_length_35mm": 50},
+        })
+        self.assertAlmostEqual(metadata["vertical_fov_deg"], 26.99, places=2)
+
+    def test_camera_conditioner_is_exact_identity_at_initialization(self):
+        class TinyUNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.class_embedding = None
+
+            def forward(self, sample, timestep, encoder_hidden_states,
+                        class_labels=None):
+                output = sample.clone()
+                if self.class_embedding is not None:
+                    output = output + self.class_embedding(
+                        class_labels).reshape(-1, 1, 1, 1)
+                return SimpleNamespace(sample=output)
+
+        unet = TinyUNet()
+        sample = torch.randn(2, 1, 2, 2)
+        timestep = torch.tensor([1, 2])
+        context = torch.randn(2, 3, 4)
+        baseline = unet(sample, timestep, context).sample
+        conditioner = CameraConditioner(
+            output_dim=1, hidden_dim=8, fourier_bands=2,
+            capture_embed_dim=4)
+        install_camera_conditioner(unet, conditioner)
+        condition = torch.stack([
+            make_camera_condition(vertical_fov_deg=35, capture_type="photo"),
+            make_camera_condition(vertical_fov_deg=90, capture_type="photo"),
+        ])
+
+        conditioned = camera_conditioned_unet(
+            unet, sample, timestep, encoder_hidden_states=context,
+            camera_condition=condition).sample
+
+        self.assertTrue(torch.equal(conditioned, baseline))
+        self.assertEqual(torch.count_nonzero(conditioner(condition)).item(), 0)
+        conditioner(condition).sum().backward()
+        self.assertGreater(
+            torch.count_nonzero(conditioner.mlp[-1].weight.grad).item(), 0)
+
+    def test_camera_conditioner_uses_diffusers_class_embedding_contract(self):
+        from diffusers import UNet2DConditionModel
+
+        unet = UNet2DConditionModel(
+            sample_size=8,
+            in_channels=4,
+            out_channels=4,
+            layers_per_block=1,
+            block_out_channels=(16,),
+            down_block_types=("DownBlock2D",),
+            up_block_types=("UpBlock2D",),
+            norm_num_groups=4,
+            cross_attention_dim=8,
+        ).eval()
+        sample = torch.randn(1, 4, 8, 8)
+        timestep = torch.tensor([5])
+        context = torch.randn(1, 2, 8)
+        with torch.no_grad():
+            baseline = unet(
+                sample, timestep, encoder_hidden_states=context).sample
+        conditioner = CameraConditioner(
+            unet.time_embedding.linear_2.out_features,
+            hidden_dim=8,
+            fourier_bands=2,
+            capture_embed_dim=4,
+        )
+        install_camera_conditioner(unet, conditioner)
+
+        with torch.no_grad():
+            conditioned = camera_conditioned_unet(
+                unet, sample, timestep, encoder_hidden_states=context,
+                camera_condition=make_camera_condition(
+                    focal_length_mm=35).unsqueeze(0),
+            ).sample
+
+        self.assertTrue(torch.equal(conditioned, baseline))
+
+    def test_camera_dropout_replaces_entire_record_with_unknown(self):
+        condition = torch.stack([
+            make_camera_condition(vertical_fov_deg=35, capture_type="photo"),
+            make_camera_condition(iso=800, capture_type="photo"),
+        ])
+        dropped = apply_camera_dropout(condition, 1.0)
+        self.assertEqual(torch.count_nonzero(dropped).item(), 0)
+
     @staticmethod
     def _tiny_sara_unet():
         class TinyUNet(nn.Module):
@@ -243,9 +366,17 @@ class ConnectorTrainingTests(unittest.TestCase):
                 return pooled.expand(-1, context_tokens, -1)
 
         class UNet(nn.Module):
-            def forward(self, noisy, _timestep, encoder_hidden_states):
+            def __init__(self):
+                super().__init__()
+                self.class_embedding = None
+
+            def forward(self, noisy, _timestep, encoder_hidden_states,
+                        class_labels=None):
                 influence = encoder_hidden_states.mean(dim=(1, 2))
                 influence = influence.reshape(-1, 1, 1, 1)
+                if self.class_embedding is not None:
+                    influence = influence + self.class_embedding(
+                        class_labels).reshape(-1, 1, 1, 1)
                 return SimpleNamespace(sample=noisy + influence)
 
         class Scheduler:
@@ -304,6 +435,27 @@ class ConnectorTrainingTests(unittest.TestCase):
         self.assertEqual(output.loss_delta.item(), 0.0)
         self.assertIsNotNone(connector.scale.grad)
         self.assertNotEqual(connector.scale.grad.item(), 0.0)
+
+        cfg.camera_conditioning_enabled = True
+        cfg.camera_metadata_dropout_prob = 0.0
+        state.camera_metadata_logged = True
+        state.camera_metadata_samples = 0
+        state.camera_presence_counts = [0, 0, 0, 0]
+        conditioner = CameraConditioner(
+            output_dim=1, hidden_dim=8, fourier_bands=2,
+            capture_embed_dim=4)
+        install_camera_conditioner(state.unet, conditioner)
+        batch["camera_condition"] = make_camera_condition(
+            focal_length_mm=35, capture_type="photo").unsqueeze(0)
+        output = diffusion_training_step(
+            state, batch, 1, use_teacher_delta=False,
+            semantic_anchor_weight=0.0)
+        output.loss.backward()
+
+        self.assertGreater(
+            torch.count_nonzero(conditioner.mlp[-1].weight.grad).item(), 0)
+        self.assertEqual(state.camera_metadata_samples, 1)
+        self.assertEqual(state.camera_presence_counts, [0, 1, 0, 0])
 
     def test_tsc_reads_long_input_and_preserves_sd_token_contract(self):
         connector = build_connector(

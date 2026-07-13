@@ -14,6 +14,12 @@ import torch
 from torch.utils.data import IterableDataset, DataLoader
 from torchvision import transforms
 
+from pure_ella.camera import (
+    CAMERA_CONDITION_DIM,
+    extract_camera_metadata,
+    camera_metadata_to_tensor,
+)
+
 
 BUCKETS = (
     (1024, 1024), (1024, 896), (1024, 768), (1024, 640), (1024, 512),
@@ -223,6 +229,8 @@ class StreamingSDDataset(IterableDataset):
             yield {
                 "image": img_tensor,
                 "image_mask": mask_tensor,
+                "camera_condition": camera_metadata_to_tensor(
+                    extract_camera_metadata(sample)),
                 "bucket": (bw, bh),
                 **captions,
             }
@@ -246,6 +254,13 @@ class BucketBatchDataset(IterableDataset):
             "caption": [sample["caption"] for sample in samples],
             "caption_medium": [sample.get("caption_medium", "") for sample in samples],
             "caption_short": [sample.get("caption_short", "") for sample in samples],
+            "camera_condition": torch.stack([
+                sample.get(
+                    "camera_condition",
+                    torch.zeros(CAMERA_CONDITION_DIM, dtype=torch.float32),
+                )
+                for sample in samples
+            ]),
             "bucket": samples[0]["bucket"],
         }
 

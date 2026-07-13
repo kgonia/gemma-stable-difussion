@@ -23,7 +23,7 @@
   "max_gemma_len": 336,
   "fail_on_prompt_truncation": true,
   "clip_id": "openai/clip-vit-large-patch14",
-  "sd_checkpoint": "/workspace/stylejourney_v10.safetensors",
+  "sd_checkpoint": "/mnt/e/stable-diffusion-webui/models/Stable-diffusion/stylejourney_v10.safetensors",
   "connector_type": "trm_yz",
   "connector_width": 768,
   "connector_layers": 4,
