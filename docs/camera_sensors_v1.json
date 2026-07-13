@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "units": "mm",
+  "models": {
+    "canon|canon eos 100d": {
+      "sensor_width_mm": 22.3,
+      "sensor_height_mm": 14.9,
+      "source": "Canon EOS 100D published specifications"
+    },
+    "canon|canon eos 50d": {
+      "sensor_width_mm": 22.3,
+      "sensor_height_mm": 14.9,
+      "source": "Canon EOS 50D published specifications"
+    },
+    "canon|canon eos 5d": {
+      "sensor_width_mm": 35.8,
+      "sensor_height_mm": 23.9,
+      "source": "Canon EOS 5D published specifications"
+    },
+    "canon|canon eos 5d mark iv": {
+      "sensor_width_mm": 36.0,
+      "sensor_height_mm": 24.0,
+      "source": "Canon EOS 5D Mark IV published specifications"
+    },
+    "nikon corporation|nikon d850": {
+      "sensor_width_mm": 35.9,
+      "sensor_height_mm": 23.9,
+      "source": "Nikon D850 published specifications"
+    }
+  }
+}

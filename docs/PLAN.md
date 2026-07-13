@@ -4,7 +4,7 @@
 `train.py`, `pure_ella/{connector,sara,config,dataset,diagnostics}.py` and
 `config_long_256.json`.*
 
-## Implementation update (2026-07-12)
+## Implementation update (2026-07-13)
 
 The supported P1 baseline is now **approximately 256-token Gemma captions
 (336-token safety window) -> 77 SD1.5 conditioning tokens**. `ella_tsc` is a
@@ -32,17 +32,20 @@ and printed step plans include the upper bound from per-bucket tail batches.
 
 P3 camera conditioning is implemented behind `camera_conditioning_enabled`.
 It adds a Fourier/MLP class-embedding branch to the UNet timestep embedding,
-with an exactly zero-initialized final projection, 40% record-level metadata
-dropout, EXIF missingness bits, a learned unknown/capture-type embedding, and a
-frozen text connector by default. `upstream_json.exif` from the Unsplash smoke
-dataset supplies focal length, aperture, and ISO. Vertical FOV is accepted
-directly or derived only from a 35 mm-equivalent focal length; raw focal length
-is retained as a separately marked fallback because sensor size is unavailable.
-P3 artifacts, strict reload, fixed-seed focal/FOV counterfactual metrics, and A/B
-generation grids are included. FOV sweeps stay disabled until FOV labels are
-observed (or explicitly overridden), preventing an untrained input channel from
-being reported as control. `config_camera_p3.json` is the P3 run template
-and requires the P1 artifact configured by `init_connector_ckpt_path`.
+with an algebraically centered unknown residual that remains exactly zero after
+optimizer updates. The camera-only template uses zero record dropout, keeps the
+text connector frozen, and disables the unsupported photo/render/artwork input.
+All JSON metadata containers are merged; guided-prediction counterfactuals are
+the primary diagnostic and CFG-delta sensitivity is secondary. Camera artifacts
+now carry an exact versioned semantic schema and incompatible camera state fails
+at load. The P3/CLIP moving-teacher combination is rejected by config validation.
+
+The committed local audit and sensor table expose only 288 strictly validated
+geometry records, not the earlier provisional 1,191. The next implementation
+gate before P3a/P3b training is the versioned manifest builder plus separate
+trusted-geometry, raw-focal, and exposure residual heads. Offline weighted
+manifests, label-null controls, and camera/lens holdouts follow; controlled
+paired or synthetic data remains required before any physical-control claim.
 
 ## Vision
 
@@ -170,62 +173,71 @@ FID/KID within a fixed tolerance band (suggest ≤5% relative) of B0.
 
 ## P3 — Camera intrinsics / metadata conditioning (the `dual-conditioning` pillar)
 
+The measured two-source data and training strategy is specified in
+[`P3_MIXED_DATA_PROPOSAL.md`](P3_MIXED_DATA_PROPOSAL.md).
+That proposal supersedes the older P3 notes below wherever they conflict. In
+particular, camera-only training uses an algebraically centered unknown residual
+and therefore no whole-record metadata dropout.
+
 ### Design
 
 Two injection points, in order of preference:
 
 1. **Micro-conditioning through the timestep embedding** (SDXL pattern, primary).
    Fourier-embed each metadata scalar, concat, small MLP → add to the UNet time
-   embedding. Focal length is a *global* scene-geometry property (see
-   `docs/HLQJQx1acAAkFtd.png`: Z = S·f/s — same pixels, different depth), so global
-   injection is semantically right. **The final MLP layer is zero-initialized** →
-   at step 0 the model is exactly the P1/P2 checkpoint.
+   embedding. Focal/FOV is a *global projection* property, so global injection is
+   semantically right. Every head is a permanently centered residual
+   `head(value) - head(unknown)`, not merely zero-initialized. Metadata-free
+   generation therefore remains exactly on the P1/P2 path after training.
    - Condition on **vertical FOV** (or log-focal normalized by sensor height), not raw
      focal length in mm — resolution/crop invariant.
-   - Candidate signals, most valuable first: FOV, capture type (photo/render/artwork as
-     a learned embedding), aperture (DoF proxy), ISO (noise/low-light proxy).
+   - Candidate signals, most valuable first: trusted FOV/35 mm equivalent,
+     aperture, exposure time, ISO and flash. Disable photo/render/artwork until a
+     source with meaningful render and artwork coverage is added.
 2. **Metadata tokens through the connector** (secondary, only if global injection is
    insufficient): append k learned tokens conditioned on the metadata to the connector
    output. Costs nothing architecturally (cross-attn is length-agnostic) and reuses the
    existing `extra_gate_logit` pattern — but it entangles the ablation with P1's token
    budget, so keep it as a fallback.
 
-**Conditioning dropout is mandatory:** drop the metadata signal (replace with a learned
-"unknown" embedding) for 30–50% of training samples, because (a) inference will usually
-have no EXIF, and (b) it enables metadata-CFG later. This is the FINO framing: metadata
-guides representation learning; it must not become a hard dependency.
+Whole-record conditioning dropout is useful only when the connector or U-Net is
+also trainable. In a camera-only phase, a centered unknown residual has zero loss
+gradient for a fully dropped record, so dropout only wastes examples. Natural
+per-field missingness still trains partial records. Use a small dropout only in
+the optional joint-refinement phase to preserve metadata-free behavior in the
+newly unfrozen path.
 
 ### Data status
 
-The first P3 smoke dataset contains EXIF under `upstream_json.exif`; the loader
-now extracts it. It does not contain sensor height, so raw focal length is never
-misrepresented as physical FOV. For larger synthetic sources, the remaining
-options are:
-
-- **Pseudo-labeling (recommended default):** run a camera-intrinsics estimator
-  (Metric3D-style canonical-camera reasoning; e.g. a WildCamera/GeoCalib-class model)
-  over the training images to produce FOV pseudo-labels. Works on the existing pipeline;
-  noisy labels are acceptable given conditioning dropout.
-- **EXIF-bearing photo dataset mixed in:** Unsplash-style or LAION subsets with EXIF
-  (FocalLength, FNumber, ISO, Model). Requires extending
-  `StreamingSDDataset._get_caption`'s JSON parsing to also emit a `metadata` dict —
-  the hook point already exists (`dataset.py:37`).
-- **Cheap prompt-derived tags** as a v0: "wide-angle", "telephoto", "85mm portrait",
-  "macro" regexed out of captions → coarse FOV buckets. Zero new data needed; good for
-  a falsifier run before investing in pseudo-labels.
+The Unsplash smoke dataset has broad scenes and exposure metadata but no trusted
+FOV. The local PicturesTraining set has about 1.2k focal-plane records but only
+288 currently pass strict dimension and sensor provenance, with narrow camera
+and photographer coverage. Neither observational set
+can isolate physical FOV from camera distance, subject, and composition. Raw
+focal length remains a correlation-only feature and must not share the trusted
+geometry head. The reproducible audit, manifest provenance, neutral captions,
+sampling arithmetic, and controls are specified in the mixed-data proposal.
 
 ### Plan of record
 
-1. v0 implemented: EXIF focal/aperture/ISO plus trusted FOV, timestep-embedding
-   injection, zero-init, dropout 0.4, and fixed-seed FOV counterfactuals.
-   **Success test:** same prompt + seed, sweep the FOV input -> monotonic, visible
-   perspective/framing change; short-prompt FID unchanged.
-2. v1: add continuous FOV pseudo-labels for records lacking trustworthy intrinsics;
-   compare against the implemented EXIF-only baseline.
-3. v2 (only if v1 works): evaluate metadata tokens if global conditioning saturates.
+1. **P3a association/memorization falsifier:** local high-confidence geometry,
+   camera-only head, real labels versus shuffled-label and constant-label controls.
+2. **P3b observational cross-source generalization:** reproducible 80/20 offline
+   manifests, camera/lens holdouts, trusted geometry plus exposure heads.
+3. **P3c controlled physical validation:** paired same-scene focal sweeps or
+   controlled synthetic renders, preferably with pose/depth. Only this stage can
+   support a claim of physical FOV control; FOV changes projection/framing at a
+   fixed pose, not camera-position perspective.
+4. **P3d optional joint refinement:** lower-rate connector or separately gated
+   SaRA update, with metadata dropout restored for the unfrozen path.
+5. Only if global conditioning demonstrably saturates, evaluate separately gated
+   metadata tokens.
 
-**Exit criteria:** FOV counterfactual sensitivity above threshold; generation with
-"unknown" metadata identical-quality to B0; sweep grids show controlled perspective.
+**Exit criteria:** unknown residual is exactly zero after optimization; real
+labels outperform shuffled and constant controls on held-out diffusion and
+guided-control metrics; metadata-free quality stays within the B0/P1 tolerance.
+Observational P3a/P3b results are reported as FOV-correlated control, not isolated
+physical control.
 
 ## P4 — DiT-ification via zero-gated blocks (optional, last, ROI-gated)
 
@@ -279,7 +291,7 @@ can be composed or ablated by choosing which patches to load, extending the exis
 |------|--------|-----------|
 | Suffix sensitivity stays < 0.03 at 256 tokens | P1 | contrastive loss weight ↑, gate init ↑ (already at −3.5), P2 widening |
 | SaRA widening degrades short prompts | P2 | per-increment FID gate, instant rollback (delete patch) |
-| Pseudo-labels too noisy → FOV signal ignored | P3 | conditioning dropout + v0 caption-bucket falsifier decides cheaply |
+| Pseudo-labels too noisy -> FOV signal ignored | P3 | keep them as a separate ablation against real, shuffled and constant-label controls |
 | Metadata leaks into text semantics (entanglement) | P3 | keep injection global (time-embed), not cross-attn, in v1 |
 | P4 gates open and drag frozen knowledge | P4 | knowledge-preservation hard gate; gate-value logging like `extra_gate_logit` |
 | Compute budget (single GPU) | all | FP32 trainable weights + BF16 autocast; gradient checkpointing already on |

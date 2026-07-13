@@ -1,0 +1,50 @@
+{
+  "audit_schema_version": 1,
+  "audit_tool_sha256": "6dde484b9f9f27df8468840ea421561db9b631e71fe9c12fb161e09d9e78b5a4",
+  "camera_distribution": {
+    "Canon|Canon EOS 100D": 795,
+    "Canon|Canon EOS 50D": 165,
+    "Canon|Canon EOS 5D": 104,
+    "Canon|Canon EOS 5D Mark IV": 145,
+    "NIKON CORPORATION|NIKON D850": 16
+  },
+  "counts": {
+    "any_exif": 1226,
+    "aperture": 1225,
+    "decoded_exif_dimensions_match": 322,
+    "exif_pixel_dimensions": 322,
+    "exposure_time": 1225,
+    "focal_length": 1225,
+    "focal_length_35mm": 16,
+    "focal_plane_sensor_derived": 321,
+    "focal_plane_xy_resolution": 1225,
+    "images": 1226,
+    "iso": 1225,
+    "sensor_diagonal_outlier": 33,
+    "sensor_diagonal_within_10_percent": 288,
+    "sensor_table_model_match": 321,
+    "xmp_crop_false": 1225,
+    "xmp_crop_missing": 1
+  },
+  "images_root_name": "PicturesTraining",
+  "lens_distribution": {
+    "100.0 mm": 48,
+    "105.0 mm f/1.4": 16,
+    "24mm": 5,
+    "50-150mm": 1,
+    "50.0 mm": 39,
+    "70-200mm F2.8 DG OS HSM | Sports 018": 27,
+    "85mm F1.4 DG HSM | Art 016": 98,
+    "EF-S18-55mm f/3.5-5.6 III": 795,
+    "EF100mm f/2.8 Macro USM": 33,
+    "EF100mm f/2.8L Macro IS USM": 11,
+    "EF24-70mm f/2.8L USM": 9,
+    "EF28-90mm f/4-5.6": 12,
+    "EF28mm f/1.8 USM": 10,
+    "EF50mm f/1.8 II": 67,
+    "EF50mm f/1.8 STM": 49
+  },
+  "sensor_table_path": "camera_sensors_v1.json",
+  "sensor_table_sha256": "0626b433bbf060ee8949a63f7e1301c00f94667ac39c7cc4b6ff0eca80e83b2e",
+  "source_manifest_content_sha256": "ff677d774e4651b0282911355225ee28e3ccdfa1f0764b38ce64620e91452d9a"
+}

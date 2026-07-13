@@ -44,6 +44,7 @@ from pure_ella.connector import build_connector
 from pure_ella.camera import (
     CameraConditioner,
     apply_camera_dropout,
+    camera_condition_schema,
     camera_conditioned_unet,
     install_camera_conditioner,
     make_camera_condition,
@@ -464,6 +465,7 @@ def build_camera_conditioner(state: TrainingState):
         output_dim=time_embed_dim,
         hidden_dim=state.cfg.camera_hidden_dim,
         fourier_bands=state.cfg.camera_fourier_bands,
+        use_capture_type=state.cfg.camera_use_capture_type,
     ).to(device=state.device, dtype=state.unet_dtype)
     install_camera_conditioner(state.unet, state.camera_conditioner)
     with torch.no_grad():
@@ -473,8 +475,27 @@ def build_camera_conditioner(state: TrainingState):
     count = sum(p.numel() for p in state.camera_conditioner.parameters())
     print(
         f"P3 camera conditioner PASS: output={time_embed_dim} params={count:,} "
-        "zero-init identity=PASS"
+        "permanent unknown identity=PASS"
     )
+
+
+def _camera_schema(state: TrainingState) -> dict | None:
+    if state.camera_conditioner is None:
+        return None
+    return camera_condition_schema(
+        use_capture_type=state.cfg.camera_use_capture_type)
+
+
+def _validate_camera_checkpoint_schema(
+    checkpoint: dict, state: TrainingState, source: str,
+) -> None:
+    expected = _camera_schema(state)
+    actual = checkpoint.get("camera_condition_schema")
+    if actual != expected:
+        raise RuntimeError(
+            f"Camera condition schema mismatch in {source}: "
+            f"expected {expected!r}, got {actual!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +762,7 @@ def run_clip_pretrain(state: TrainingState):
              state.camera_conditioner.state_dict().items()}
             if state.camera_conditioner is not None else None
         ),
+        "camera_condition_schema": _camera_schema(state),
         "config": cfg.to_dict(),
         "stage": "clip_alignment_pretrain",
     }, ckpt_path)
@@ -1211,6 +1233,7 @@ def run_ella_training(state: TrainingState):
              state.camera_conditioner.state_dict().items()}
             if state.camera_conditioner is not None else None
         ),
+        "camera_condition_schema": _camera_schema(state),
         "config": cfg.to_dict(),
         "stage": "ella_frozen_unet",
     }, ckpt_path)
@@ -1516,6 +1539,7 @@ def run_save_artifacts(state: TrainingState):
              state.camera_conditioner.state_dict().items()}
             if state.camera_conditioner is not None else None
         ),
+        "camera_condition_schema": _camera_schema(state),
         "gemma_model_id": cfg.gemma_id,
         "sd_checkpoint": cfg.sd_checkpoint,
         "run_config": cfg.to_dict(),
@@ -1526,15 +1550,12 @@ def run_save_artifacts(state: TrainingState):
     if state.camera_conditioner is not None:
         camera_path = f"{cfg.output_dir}/pure_ella_camera_conditioner.pt"
         torch.save({
-            "architecture": "zero-init camera timestep conditioning",
+            "architecture": "centered camera timestep conditioning",
             "camera_conditioner_state_dict": {
                 k: v.detach().cpu()
                 for k, v in state.camera_conditioner.state_dict().items()
             },
-            "condition_schema": (
-                "normalized[fov,focal,aperture,iso], "
-                "present[fov,focal,aperture,iso], capture_type_id"
-            ),
+            "camera_condition_schema": _camera_schema(state),
             "run_config": cfg.to_dict(),
         }, camera_path)
         print("Camera conditioner saved:", camera_path)
@@ -1616,10 +1637,12 @@ def run_reload_proof(state: TrainingState):
         camera_path = f"{cfg.output_dir}/pure_ella_camera_conditioner.pt"
         camera_ckpt = torch.load(
             camera_path, map_location="cpu", weights_only=True)
+        _validate_camera_checkpoint_schema(camera_ckpt, state, camera_path)
         reloaded_camera = CameraConditioner(
             output_dim=reloaded_unet.time_embedding.linear_2.out_features,
             hidden_dim=cfg.camera_hidden_dim,
             fourier_bands=cfg.camera_fourier_bands,
+            use_capture_type=cfg.camera_use_capture_type,
         ).to(device=state.device, dtype=state.unet_dtype)
         reloaded_camera.load_state_dict(
             camera_ckpt["camera_conditioner_state_dict"], strict=True)
@@ -1799,6 +1822,11 @@ def _load_connector_checkpoint(state: TrainingState, ckpt_path: str):
     print(f"Loaded connector from {ckpt_path} (stage={stage}, strict={strict})")
     camera_sd = ckpt.get("camera_conditioner_state_dict")
     if state.camera_conditioner is not None and camera_sd:
+        try:
+            _validate_camera_checkpoint_schema(ckpt, state, ckpt_path)
+        except RuntimeError as error:
+            print(error)
+            return False
         state.camera_conditioner.load_state_dict(camera_sd, strict=True)
         print("Loaded camera conditioner from the same checkpoint")
     return True

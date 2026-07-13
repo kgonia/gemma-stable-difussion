@@ -1,4 +1,4 @@
-"""Camera metadata extraction and zero-init SD timestep conditioning."""
+"""Camera metadata extraction and centered SD timestep conditioning."""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,36 @@ import torch.nn as nn
 CAMERA_VALUE_COUNT = 4
 CAMERA_CONDITION_DIM = 9
 CAMERA_CAPTURE_TYPES = ("unknown", "photo", "render", "artwork")
+CAMERA_SCHEMA_VERSION = 2
+CAMERA_FEATURE_NAMES = (
+    "vertical_fov_deg_normalized",
+    "focal_length_mm_normalized",
+    "aperture_f_number_normalized",
+    "iso_normalized",
+    "vertical_fov_present",
+    "focal_length_present",
+    "aperture_present",
+    "iso_present",
+    "capture_type_id",
+)
 _CAPTURE_TO_ID = {name: index for index, name in enumerate(CAMERA_CAPTURE_TYPES)}
+
+
+def camera_condition_schema(*, use_capture_type: bool) -> dict:
+    """Return the semantic schema that must match exactly across checkpoints."""
+    return {
+        "version": CAMERA_SCHEMA_VERSION,
+        "condition_dim": CAMERA_CONDITION_DIM,
+        "feature_names": list(CAMERA_FEATURE_NAMES),
+        "normalization": {
+            "vertical_fov_deg": "clip[5,150]; (x-75)/70",
+            "focal_length_mm": "clip[2,1200]; log(x/50)/log(10)",
+            "aperture_f_number": "clip[0.5,64]; log(x/4)/log(4)",
+            "iso": "clip[12.5,409600]; log(x/100)/log(64)",
+        },
+        "unknown_centered": True,
+        "use_capture_type": bool(use_capture_type),
+    }
 
 
 def _mapping(value: Any) -> dict:
@@ -71,12 +100,16 @@ def _capture_type(sample: Mapping[str, Any], metadata: Mapping[str, Any],
 def extract_camera_metadata(sample: Mapping[str, Any]) -> dict:
     """Extract physical values without fabricating missing sensor information."""
     metadata = {}
+    exif = {}
     for key in ("upstream_json", "json", "metadata"):
         candidate = _mapping(sample.get(key))
-        if candidate:
-            metadata = candidate
-            break
-    exif = _mapping(metadata.get("exif"))
+        candidate_exif = _mapping(candidate.get("exif"))
+        metadata.update({
+            nested_key: value
+            for nested_key, value in candidate.items()
+            if nested_key != "exif"
+        })
+        exif.update(candidate_exif)
     sources = [sample, exif, metadata]
 
     vertical_fov = _first_float(
@@ -157,29 +190,34 @@ def apply_camera_dropout(condition: torch.Tensor, probability: float) -> torch.T
 class CameraConditioner(nn.Module):
     """Map camera scalars into SD's timestep embedding space.
 
-    The final projection is exactly zero at initialization, preserving the
-    pretrained UNet function before camera training starts.
+    Every output is centered on the learned unknown output. Consequently an
+    unknown record remains exactly zero after every optimizer update.
     """
 
     def __init__(self, output_dim: int, hidden_dim: int = 512,
-                 fourier_bands: int = 6, capture_embed_dim: int = 32):
+                 fourier_bands: int = 6, capture_embed_dim: int = 32,
+                 use_capture_type: bool = False):
         super().__init__()
         if output_dim <= 0 or hidden_dim <= 0 or fourier_bands <= 0:
             raise ValueError("Camera conditioner dimensions must be positive")
         self.output_dim = int(output_dim)
         self.hidden_dim = int(hidden_dim)
         self.fourier_bands = int(fourier_bands)
-        self.capture_embed_dim = int(capture_embed_dim)
+        self.use_capture_type = bool(use_capture_type)
+        self.capture_embed_dim = (
+            int(capture_embed_dim) if self.use_capture_type else 0)
         self.register_buffer(
             "frequencies",
             torch.pi * (2.0 ** torch.arange(fourier_bands, dtype=torch.float32)),
         )
-        self.capture_embedding = nn.Embedding(
-            len(CAMERA_CAPTURE_TYPES), capture_embed_dim)
+        self.capture_embedding = (
+            nn.Embedding(len(CAMERA_CAPTURE_TYPES), self.capture_embed_dim)
+            if self.use_capture_type else None
+        )
         input_dim = (
             CAMERA_VALUE_COUNT * (1 + 2 * fourier_bands)
             + CAMERA_VALUE_COUNT
-            + capture_embed_dim
+            + self.capture_embed_dim
         )
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -189,7 +227,7 @@ class CameraConditioner(nn.Module):
         nn.init.zeros_(self.mlp[-1].weight)
         nn.init.zeros_(self.mlp[-1].bias)
 
-    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+    def _features(self, condition: torch.Tensor) -> torch.Tensor:
         if condition.ndim != 2 or condition.shape[1] != CAMERA_CONDITION_DIM:
             raise ValueError(
                 f"camera condition must have shape [batch, {CAMERA_CONDITION_DIM}]"
@@ -199,11 +237,19 @@ class CameraConditioner(nn.Module):
         values = values * present
         angles = values.unsqueeze(-1) * self.frequencies
         fourier = torch.cat((angles.sin(), angles.cos()), dim=-1).flatten(1)
-        capture_ids = condition[:, -1].long().clamp(
-            0, len(CAMERA_CAPTURE_TYPES) - 1)
-        features = torch.cat(
-            (values, fourier, present, self.capture_embedding(capture_ids)), dim=1)
-        return self.mlp(features.to(dtype=self.mlp[0].weight.dtype))
+        parts = [values, fourier, present]
+        if self.capture_embedding is not None:
+            capture_ids = condition[:, -1].long().clamp(
+                0, len(CAMERA_CAPTURE_TYPES) - 1)
+            parts.append(self.capture_embedding(capture_ids))
+        return torch.cat(parts, dim=1).to(dtype=self.mlp[0].weight.dtype)
+
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+        features = self._features(condition)
+        unknown_features = self._features(torch.zeros_like(condition))
+        residual = self.mlp(features) - self.mlp(unknown_features)
+        unknown = condition.eq(0).all(dim=1, keepdim=True)
+        return residual.masked_fill(unknown, 0)
 
     def unknown(self, batch_size: int, device: torch.device) -> torch.Tensor:
         return torch.zeros(

@@ -374,7 +374,7 @@ def teacher_student_delta_alignment(prompt: str, state, timestep: int = 500, lab
 def camera_counterfactual_sensitivity(
     state, prompt: str = None, label: str = "camera_cf", wandb=None,
 ) -> dict:
-    """Measure camera A/B influence on a fixed prompt's CFG delta."""
+    """Measure camera A/B influence on guided and component predictions."""
     cfg = state.cfg
     if not cfg.camera_conditioning_enabled:
         return {}
@@ -427,12 +427,17 @@ def camera_counterfactual_sensitivity(
         delta_a = predictions[0][0:1] - predictions[0][1:2]
         delta_b = predictions[1][0:1] - predictions[1][1:2]
         sensitivity = _rel_diff(delta_a, delta_b)
+        guided_a = predictions[0][1:2] + cfg.val_guidance * delta_a
+        guided_b = predictions[1][1:2] + cfg.val_guidance * delta_b
+        guided_rel_diff = _rel_diff(guided_a, guided_b)
         prediction_rel_diff = _rel_diff(predictions[0], predictions[1])
         print(
             f"[{label}] {name} {value_a:g} vs {value_b:g}: "
+            f"guided rel_diff={guided_rel_diff:.6f} "
             f"CFG-delta rel_diff={sensitivity:.6f}"
         )
         return {
+            f"{name}_guided_relative_diff": guided_rel_diff,
             f"{name}_cfg_delta_relative_diff": sensitivity,
             f"{name}_prediction_relative_diff": prediction_rel_diff,
             f"{name}_a": value_a,

@@ -137,6 +137,7 @@ class TrainConfig:
     camera_conditioning_enabled: bool = False
     camera_train_connector: bool = False
     camera_metadata_dropout_prob: float = 0.4
+    camera_use_capture_type: bool = False
     camera_lr: float = 1e-4
     camera_hidden_dim: int = 512
     camera_fourier_bands: int = 6
@@ -272,10 +273,24 @@ class TrainConfig:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")
         if not 0.0 <= self.camera_metadata_dropout_prob < 1.0:
             raise ValueError("camera_metadata_dropout_prob must be in [0, 1)")
+        if (self.run_training and self.camera_conditioning_enabled
+                and not self.camera_train_connector and not self.run_sara_phase
+                and self.camera_metadata_dropout_prob != 0.0):
+            raise ValueError(
+                "camera-only training requires camera_metadata_dropout_prob=0: "
+                "a permanently centered unknown record has zero camera gradient"
+            )
         if self.camera_hidden_dim <= 0 or self.camera_fourier_bands <= 0:
             raise ValueError("camera conditioner dimensions must be positive")
         if self.camera_lr <= 0:
             raise ValueError("camera_lr must be positive")
+        if (self.camera_conditioning_enabled and self.use_clip_teacher_delta
+                and (self.lambda_teacher > 0 or self.lambda_text_delta > 0)):
+            raise ValueError(
+                "CLIP teacher-delta cannot be enabled with a trainable camera "
+                "conditioner: it would make the teacher target move after each "
+                "optimizer step"
+            )
         if not (0 < self.camera_counterfactual_fov_a <= 180
                 and 0 < self.camera_counterfactual_fov_b <= 180):
             raise ValueError("camera counterfactual FOV values must be in (0, 180]")
@@ -379,7 +394,8 @@ class TrainConfig:
         print(
             f"Camera conditioning: {self.camera_conditioning_enabled} "
             f"dropout={self.camera_metadata_dropout_prob} "
-            f"train_connector={self.camera_train_connector}"
+            f"train_connector={self.camera_train_connector} "
+            f"capture_type={self.camera_use_capture_type}"
         )
         print(f"Output: {self.output_dir}")
 

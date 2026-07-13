@@ -11,6 +11,7 @@ from PIL import Image
 from transformers import BatchEncoding
 
 from train import (
+    _validate_camera_checkpoint_schema,
     diffusion_training_step,
     estimate_steps,
     make_encode_gemma,
@@ -24,6 +25,7 @@ from pure_ella.camera import (
     CAMERA_CONDITION_DIM,
     CameraConditioner,
     apply_camera_dropout,
+    camera_condition_schema,
     camera_conditioned_unet,
     camera_metadata_to_tensor,
     extract_camera_metadata,
@@ -82,6 +84,17 @@ class ConnectorTrainingTests(unittest.TestCase):
             "metadata": {"focal_length_35mm": 50},
         })
         self.assertAlmostEqual(metadata["vertical_fov_deg"], 26.99, places=2)
+
+    def test_camera_metadata_merges_all_nested_containers(self):
+        metadata = extract_camera_metadata({
+            "upstream_json": {"exif": {"focal_length": 35}, "iso": 100},
+            "json": json.dumps({"exif": {"aperture": 2.8}}),
+            "metadata": {"exif": {"iso": 400}},
+        })
+
+        self.assertEqual(metadata["focal_length_mm"], 35.0)
+        self.assertEqual(metadata["aperture_f_number"], 2.8)
+        self.assertEqual(metadata["iso"], 400.0)
 
     def test_camera_conditioner_is_exact_identity_at_initialization(self):
         class TinyUNet(nn.Module):
@@ -157,6 +170,69 @@ class ConnectorTrainingTests(unittest.TestCase):
             ).sample
 
         self.assertTrue(torch.equal(conditioned, baseline))
+
+    def test_unknown_camera_condition_remains_zero_after_optimizer_step(self):
+        conditioner = CameraConditioner(
+            output_dim=3, hidden_dim=8, fourier_bands=2)
+        optimizer = torch.optim.AdamW(conditioner.parameters(), lr=0.1)
+        known = make_camera_condition(
+            vertical_fov_deg=35, capture_type="photo").unsqueeze(0)
+        target = torch.ones(1, 3)
+
+        loss = torch.nn.functional.mse_loss(conditioner(known), target)
+        loss.backward()
+        optimizer.step()
+
+        unknown = conditioner.unknown(2, torch.device("cpu"))
+        self.assertTrue(torch.equal(
+            conditioner(unknown), torch.zeros(2, 3)))
+        self.assertGreater(torch.count_nonzero(conditioner(known)).item(), 0)
+
+    def test_capture_type_is_ignored_until_explicitly_enabled(self):
+        conditioner = CameraConditioner(
+            output_dim=2, hidden_dim=8, fourier_bands=2,
+            use_capture_type=False)
+        with torch.no_grad():
+            conditioner.mlp[-1].weight.fill_(0.1)
+        photo = make_camera_condition(
+            vertical_fov_deg=35, capture_type="photo").unsqueeze(0)
+        artwork = make_camera_condition(
+            vertical_fov_deg=35, capture_type="artwork").unsqueeze(0)
+
+        self.assertTrue(torch.equal(conditioner(photo), conditioner(artwork)))
+
+    def test_camera_checkpoint_schema_rejects_semantic_mismatch(self):
+        cfg = TrainConfig()
+        cfg.camera_use_capture_type = False
+        state = SimpleNamespace(
+            cfg=cfg,
+            camera_conditioner=CameraConditioner(
+                output_dim=2, hidden_dim=8, fourier_bands=2),
+        )
+        checkpoint = {
+            "camera_condition_schema": camera_condition_schema(
+                use_capture_type=True),
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "schema mismatch"):
+            _validate_camera_checkpoint_schema(checkpoint, state, "test.pt")
+
+    def test_config_rejects_camera_with_active_clip_teacher(self):
+        with self.assertRaisesRegex(ValueError, "teacher target move"):
+            TrainConfig(
+                camera_conditioning_enabled=True,
+                camera_metadata_dropout_prob=0.0,
+                use_clip_teacher_delta=True,
+                lambda_teacher=1.0,
+            )
+
+    def test_config_rejects_dropout_for_camera_only_training(self):
+        with self.assertRaisesRegex(ValueError, "camera-only training"):
+            TrainConfig(
+                camera_conditioning_enabled=True,
+                camera_train_connector=False,
+                camera_metadata_dropout_prob=0.4,
+            )
 
     def test_camera_dropout_replaces_entire_record_with_unknown(self):
         condition = torch.stack([
