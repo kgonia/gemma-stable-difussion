@@ -61,9 +61,12 @@ guarantee and the ablation story: each pillar is exactly removable.
   (`run_sara_training` — implemented, not a stub despite README wording).
 - `ella_tsc` is the supported default. It compresses long Gemma input into 77
   fixed queries; `recursive_y` and `trm_yz` remain experimental variants.
-- `pure_ella/sara.py` builds |w| < 1e-3 masks with warn/abort gates (2% / 5%),
-  gradient hooks, and sparse save/load — the reload proof applies the sparse patch to a
-  freshly loaded UNet, which is exactly the right "removable delta" design.
+- `pure_ella/sara.py` supports the legacy |w| threshold and exact global
+  magnitude-rank selection. Shipped runs select 10% of the `attn2` K/V scope
+  with 5% minimum, 15% warning, and 25% abort gates; reports also show the much
+  smaller whole-U-Net fraction. Masks remain boolean through gradient hooks,
+  selected-weight delta norms are recorded after training, and the reload proof
+  applies the sparse patch to a freshly loaded U-Net.
 - Diagnostics cover input-suffix sensitivity, short-prompt teacher-student delta
   alignment, FID/KID, and reload proofs. Output-token ablation is intentionally
   obsolete because the connector always emits exactly 77 tokens.
@@ -128,19 +131,25 @@ This is the baseline every later pillar is measured against.
 
 ## P2 — Undertrained-weight training (SaRA), widened deliberately
 
-Already implemented for `attn2` K/V. The pillar-2 work is *disciplined widening*, not
+Already implemented for `attn2` K/V. The initial capacity experiment uses an exact
+global magnitude rank rather than treating the accidental 2.33% selected by
+`|w| < 1e-3` as a safety boundary. The pillar-2 work is *disciplined widening*, not
 new machinery:
 
 1. Keep `attn2.to_k/to_v` only until P1 exit criteria are met and gains plateau.
-2. Then widen the mask scope in controlled increments, re-using the same
+2. Sweep 5%, 10%, and 20% of K/V first. Then widen the mask scope in controlled
+   increments, re-using the same
    `sara_target_substrings` mechanism: `attn2.to_q` → `attn2.to_out` → `attn1` →
-   feed-forward `ff.net`. One increment per experiment; keep the 5% abort gate.
+   feed-forward `ff.net`. One increment per experiment; the 25% target-scope
+   abort gate prevents accidental broad updates while quality metrics remain the
+   actual knowledge-preservation gate.
 3. Track a **knowledge-preservation metric** per increment: FID/KID and CLIP-teacher
    grids on *short* (77-token) prompts must not regress vs. B0. If they do, the
    increment is rolled back — the sparse-patch format makes this a file deletion.
 4. Optional (paper-faithful): re-select the mask from *current* weights at the start of
    each increment rather than reusing stale masks — the "undertrained" set shifts as
-   training proceeds.
+   training proceeds. A mid-run replacement must save the union of every updated
+   mask so a reloaded sparse patch is identical to the live U-Net.
 
 **Exit criteria:** long-prompt metrics improve monotonically per increment; short-prompt
 FID/KID within a fixed tolerance band (suggest ≤5% relative) of B0.

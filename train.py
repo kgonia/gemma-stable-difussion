@@ -47,7 +47,9 @@ from pure_ella.sara import (
     install_sara_gradient_masks,
     remove_sara_gradient_masks,
     collect_sara_sparse_values,
+    capture_sara_selected_values,
     load_sara_sparse_values,
+    sara_selected_delta_metrics,
 )
 from pure_ella.diagnostics import (
     FINAL_SUMMARIES,
@@ -1119,11 +1121,15 @@ def run_sara_training(state: TrainingState):
         p.requires_grad_(False)
     sara_summary = build_sara_attn2_kv_sparse_masks(
         state.unet,
+        selection_mode=cfg.sara_selection_mode,
+        target_fraction=cfg.sara_target_fraction,
         threshold=cfg.sara_threshold,
+        min_sparse_fraction=cfg.sara_min_sparse_fraction,
         max_sparse_fraction_warn=cfg.sara_max_sparse_fraction_warn,
         max_sparse_fraction_abort=cfg.sara_max_sparse_fraction_abort,
         target_substrings=cfg.sara_target_substrings,
     )
+    initial_sparse_values = capture_sara_selected_values(state.unet)
     grad_handles = install_sara_gradient_masks(state.unet)
 
     # Connector stays trainable
@@ -1176,11 +1182,27 @@ def run_sara_training(state: TrainingState):
         optimizer,
         trainable_params,
     )
+    delta_metrics = sara_selected_delta_metrics(
+        state.unet, initial_sparse_values
+    )
     sara_summary_dict.update({
         "sparse_selected": sara_summary["selected"],
         "sparse_total": sara_summary["total_target"],
         "sparse_fraction": sara_summary["fraction"],
+        "sparse_target_scope_fraction": sara_summary[
+            "target_scope_fraction"
+        ],
+        "sparse_whole_unet_fraction": sara_summary[
+            "whole_unet_fraction"
+        ],
+        **delta_metrics,
     })
+    print(
+        "SaRA selected-weight delta: "
+        f"L2={delta_metrics['selected_delta_l2']:.6g} "
+        f"relative={delta_metrics['selected_delta_relative_l2']:.6g} "
+        f"RMS={delta_metrics['selected_delta_rms']:.6g}"
+    )
     remember_final_summary(
         "sara_attn2_kv", sara_summary_dict,
         wandb_prefix="final/sara_attn2_kv", wandb=state.wandb)

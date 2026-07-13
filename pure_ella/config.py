@@ -106,7 +106,12 @@ class TrainConfig:
     # --- SaRA ---
     sara_scope: str = "attn2_kv_sparse"
     sara_target_substrings: tuple = ("attn2.to_k", "attn2.to_v")
+    sara_selection_mode: Literal[
+        "magnitude_threshold", "target_fraction"
+    ] = "magnitude_threshold"
+    sara_target_fraction: float = 0.10
     sara_threshold: float = 1e-3
+    sara_min_sparse_fraction: float = 0.0
     sara_max_sparse_fraction_warn: float = 0.02
     sara_max_sparse_fraction_abort: float = 0.05
 
@@ -250,6 +255,38 @@ class TrainConfig:
             )
         if not 0.0 <= self.conditioning_dropout_prob < 1.0:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")
+        if self.sara_selection_mode not in {
+            "magnitude_threshold", "target_fraction"
+        }:
+            raise ValueError(
+                "sara_selection_mode must be 'magnitude_threshold' or "
+                "'target_fraction'"
+            )
+        if self.sara_threshold <= 0:
+            raise ValueError("sara_threshold must be positive")
+        sparse_gates = (
+            self.sara_min_sparse_fraction,
+            self.sara_max_sparse_fraction_warn,
+            self.sara_max_sparse_fraction_abort,
+        )
+        if not (
+            0.0 <= sparse_gates[0] <= sparse_gates[1]
+            <= sparse_gates[2] <= 1.0
+        ):
+            raise ValueError(
+                "SaRA sparse-fraction gates must satisfy "
+                "0 <= min <= warn <= abort <= 1"
+            )
+        if not 0.0 < self.sara_target_fraction <= 1.0:
+            raise ValueError("sara_target_fraction must be in (0, 1]")
+        if self.sara_selection_mode == "target_fraction" and not (
+            self.sara_min_sparse_fraction <= self.sara_target_fraction
+            <= self.sara_max_sparse_fraction_abort
+        ):
+            raise ValueError(
+                "sara_target_fraction must be between the minimum and abort "
+                "sparse-fraction gates"
+            )
         caption_mix = (
             self.caption_mix_short,
             self.caption_mix_medium,
@@ -295,6 +332,11 @@ class TrainConfig:
         print(f"CLIP pretrain: {self.run_clip_alignment_pretrain} (max_steps={self.pretrain_max_opt_steps})")
         print(f"ELLA training: steps≤{self.ella_max_opt_steps}")
         print(f"SaRA: {self.run_sara_phase}")
+        if self.run_sara_phase:
+            print(
+                f"SaRA selection: {self.sara_selection_mode} "
+                f"target={self.sara_target_fraction:.1%}"
+            )
         print(f"Gemma: {self.gemma_id} layer={self.gemma_layer_index}")
         print(f"SD checkpoint: {self.sd_checkpoint}")
         print(

@@ -33,10 +33,39 @@ from pure_ella.diagnostics import (
     suffix_counterfactual_sensitivity,
     validate_suffix_counterfactual_token_boundaries,
 )
-from pure_ella.sara import install_sara_gradient_masks, remove_sara_gradient_masks
+from pure_ella.sara import (
+    build_sara_attn2_kv_sparse_masks,
+    capture_sara_selected_values,
+    install_sara_gradient_masks,
+    remove_sara_gradient_masks,
+    sara_selected_delta_metrics,
+)
 
 
 class ConnectorTrainingTests(unittest.TestCase):
+    @staticmethod
+    def _tiny_sara_unet():
+        class TinyUNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.block_a = nn.Module()
+                self.block_a.attn2 = nn.Module()
+                self.block_a.attn2.to_k = nn.Linear(4, 1, bias=False)
+                self.block_b = nn.Module()
+                self.block_b.attn2 = nn.Module()
+                self.block_b.attn2.to_v = nn.Linear(4, 1, bias=False)
+                self.unrelated = nn.Linear(2, 2, bias=False)
+
+        unet = TinyUNet()
+        with torch.no_grad():
+            unet.block_a.attn2.to_k.weight.copy_(
+                torch.tensor([[1.0, 1.0, 1.0, 4.0]])
+            )
+            unet.block_b.attn2.to_v.weight.copy_(
+                torch.tensor([[5.0, 6.0, 7.0, 8.0]])
+            )
+        return unet
+
     def test_precision_config_keeps_sara_weights_full_precision(self):
         cfg = TrainConfig(
             model_weight_dtype="float32",
@@ -77,6 +106,88 @@ class ConnectorTrainingTests(unittest.TestCase):
             run_sara_training(state)
 
         build_masks.assert_not_called()
+
+    def test_sara_target_fraction_selects_exact_global_rank_with_ties(self):
+        unet = self._tiny_sara_unet()
+        summary = build_sara_attn2_kv_sparse_masks(
+            unet,
+            selection_mode="target_fraction",
+            target_fraction=0.25,
+            min_sparse_fraction=0.20,
+            max_sparse_fraction_warn=0.30,
+            max_sparse_fraction_abort=0.50,
+        )
+
+        self.assertEqual(summary["selected"], 2)
+        self.assertEqual(summary["total_target"], 8)
+        self.assertEqual(summary["fraction"], 0.25)
+        self.assertEqual(summary["total_unet"], 12)
+        self.assertAlmostEqual(summary["target_scope_fraction"], 8 / 12)
+        self.assertAlmostEqual(summary["whole_unet_fraction"], 2 / 12)
+        self.assertEqual(summary["magnitude_cutoff"], 1.0)
+        self.assertEqual(
+            unet.block_a.attn2.to_k.weight._sara_sparse_mask.tolist(),
+            [[True, True, False, False]],
+        )
+        self.assertFalse(unet.unrelated.weight.requires_grad)
+
+    def test_sara_threshold_mode_and_minimum_gate_remain_available(self):
+        unet = self._tiny_sara_unet()
+        summary = build_sara_attn2_kv_sparse_masks(
+            unet,
+            selection_mode="magnitude_threshold",
+            threshold=4.5,
+            min_sparse_fraction=0.40,
+            max_sparse_fraction_warn=0.60,
+            max_sparse_fraction_abort=0.80,
+        )
+        self.assertEqual(summary["selected"], 4)
+
+        with self.assertRaisesRegex(RuntimeError, "below minimum gate"):
+            build_sara_attn2_kv_sparse_masks(
+                self._tiny_sara_unet(),
+                threshold=1.5,
+                min_sparse_fraction=0.50,
+                max_sparse_fraction_warn=0.60,
+                max_sparse_fraction_abort=0.80,
+            )
+
+    def test_sara_reports_selected_weight_delta(self):
+        unet = self._tiny_sara_unet()
+        build_sara_attn2_kv_sparse_masks(
+            unet,
+            selection_mode="target_fraction",
+            target_fraction=0.25,
+            max_sparse_fraction_warn=0.30,
+            max_sparse_fraction_abort=0.50,
+        )
+        baseline = capture_sara_selected_values(unet)
+        with torch.no_grad():
+            mask = unet.block_a.attn2.to_k.weight._sara_sparse_mask
+            unet.block_a.attn2.to_k.weight[mask] += 0.5
+
+        metrics = sara_selected_delta_metrics(unet, baseline)
+        self.assertAlmostEqual(metrics["selected_delta_rms"], 0.5)
+        self.assertAlmostEqual(metrics["selected_delta_max_abs"], 0.5)
+        self.assertAlmostEqual(metrics["selected_delta_relative_l2"], 0.5)
+
+    def test_config_validates_sara_target_fraction_and_gates(self):
+        cfg = TrainConfig(
+            sara_selection_mode="target_fraction",
+            sara_target_fraction=0.10,
+            sara_min_sparse_fraction=0.05,
+            sara_max_sparse_fraction_warn=0.15,
+            sara_max_sparse_fraction_abort=0.25,
+        )
+        self.assertEqual(cfg.sara_target_fraction, 0.10)
+        with self.assertRaisesRegex(ValueError, "between the minimum"):
+            TrainConfig(
+                sara_selection_mode="target_fraction",
+                sara_target_fraction=0.30,
+                sara_min_sparse_fraction=0.05,
+                sara_max_sparse_fraction_warn=0.15,
+                sara_max_sparse_fraction_abort=0.25,
+            )
 
     def test_config_rejects_non_unet_aligned_buckets(self):
         with self.assertRaisesRegex(ValueError, "multiples of 64"):
