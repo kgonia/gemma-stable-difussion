@@ -43,7 +43,7 @@ Edit `config.json` or pass a custom path. Key settings:
 | `max_gemma_len` | 336 | Input limit with headroom for roughly 256-token captions |
 | `context_tokens` | 77 | Fixed SD1.5 cross-attention contract; output expansion is rejected |
 | `gemma_layer_mix_count` | 4 | Learned mixture of upper Gemma hidden layers |
-| `model_weight_dtype` | `float32` | Parameter and optimizer precision; required for SaRA |
+| `model_weight_dtype` | `float32` | Parameter and optimizer precision; FP32 is required for training |
 | `mixed_precision` | `no` (supplied configs: `bf16`) | CUDA forward autocast; keeps trainable parameters in FP32 |
 | `data_sources` | list | Local Parquet files/directories/globs and/or Hugging Face repositories |
 | `max_image_dimension` | 1024 | Maximum long edge before full-frame bucketing |

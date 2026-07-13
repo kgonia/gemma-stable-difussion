@@ -16,6 +16,7 @@ from train import (
     make_encode_gemma,
     resolve_autocast_dtype,
     resolve_model_weight_dtype,
+    run_sara_training,
     select_training_captions,
 )
 from pure_ella.config import TrainConfig, resolve_sd_checkpoint
@@ -51,11 +52,31 @@ class ConnectorTrainingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "mixed_precision"):
             TrainConfig(mixed_precision="fp16")
-        with self.assertRaisesRegex(ValueError, "SaRA requires"):
+        with self.assertRaisesRegex(ValueError, "Training requires"):
             TrainConfig(
-                experiment_stage="stage3_long_context_with_sara",
                 model_weight_dtype="bfloat16",
             )
+
+        diagnostic = TrainConfig(
+            experiment_stage="stage3_long_context_with_sara",
+            run_mode="diagnostic",
+            model_weight_dtype="bfloat16",
+        )
+        self.assertFalse(diagnostic.run_training)
+        self.assertTrue(diagnostic.run_sara_phase)
+
+    def test_sara_does_not_train_in_diagnostic_mode(self):
+        state = SimpleNamespace(cfg=SimpleNamespace(
+            run_training=False,
+            run_sara_phase=True,
+            sara_epochs=1,
+        ))
+        with patch(
+            "train.build_sara_attn2_kv_sparse_masks"
+        ) as build_masks:
+            run_sara_training(state)
+
+        build_masks.assert_not_called()
 
     def test_config_rejects_non_unet_aligned_buckets(self):
         with self.assertRaisesRegex(ValueError, "multiples of 64"):

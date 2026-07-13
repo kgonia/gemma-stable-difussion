@@ -1110,7 +1110,7 @@ def run_ella_training(state: TrainingState):
 # ---------------------------------------------------------------------------
 def run_sara_training(state: TrainingState):
     cfg = state.cfg
-    if not cfg.run_sara_phase or cfg.sara_epochs <= 0:
+    if not cfg.run_training or not cfg.run_sara_phase or cfg.sara_epochs <= 0:
         print("SaRA phase disabled")
         return
 

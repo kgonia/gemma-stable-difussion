@@ -97,8 +97,8 @@ suggestions in [`REVIEW.md`](REVIEW.md)), ordered by importance:
    shared phase-configured loop driver.
 4. **Minor (fixed):** `ClipGeometryLoss()` is instantiated once per phase. SaRA
    masks remain bool through their gradient hooks. Model weight dtype and BF16
-   autocast are configured separately; SaRA rejects reduced-precision U-Net
-   weights so sparse updates and Adam state remain FP32.
+   autocast are configured separately; all training modes require FP32 master
+   weights so connector/SaRA updates and Adam state remain full precision.
 5. **Silent-config hazards (fixed):** unknown JSON keys fail fast;
    `context_tokens` is validated as the fixed 77-token SD1.5 output contract; run
    modes no longer overwrite explicit sample or optimizer-step budgets.

@@ -241,11 +241,12 @@ class TrainConfig:
             )
         if self.mixed_precision not in {"no", "bf16"}:
             raise ValueError("mixed_precision must be 'no' or 'bf16'")
-        if self.run_sara_phase and self.model_weight_dtype != "float32":
+        if self.run_training and self.model_weight_dtype != "float32":
             raise ValueError(
-                "SaRA requires model_weight_dtype='float32' so sparse U-Net "
-                "updates and optimizer state remain full precision; use "
-                "mixed_precision='bf16' to reduce activation memory"
+                "Training requires model_weight_dtype='float32' so connector "
+                "and sparse U-Net updates and optimizer state remain full "
+                "precision; use mixed_precision='bf16' to reduce activation "
+                "memory"
             )
         if not 0.0 <= self.conditioning_dropout_prob < 1.0:
             raise ValueError("conditioning_dropout_prob must be in [0, 1)")

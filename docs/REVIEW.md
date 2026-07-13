@@ -108,8 +108,8 @@ non-selected entries. The sparse save/reload path (`collect_sara_sparse_values` 
 
 `model_weight_dtype` controls parameter storage and `mixed_precision` controls
 forward autocast. Supplied configs keep trainable weights and Adam state in FP32,
-use BF16 CUDA autocast, and retain FP32 loss reductions. SaRA rejects BF16 U-Net
-weights because sparse updates require full-precision parameters.
+use BF16 CUDA autocast, and retain FP32 loss reductions. Every training run rejects
+BF16 master weights; BF16 weight storage is diagnostic/inference-only.
 
 ## 7–9. Config-loading hazards (document or assert)
 
