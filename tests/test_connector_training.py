@@ -13,11 +13,14 @@ from transformers import BatchEncoding
 from train import (
     _validate_camera_checkpoint_schema,
     diffusion_training_step,
+    DiffusionPhaseSpec,
+    DiffusionStepOutput,
     estimate_steps,
     make_encode_gemma,
     residual_context_for_captions,
     resolve_autocast_dtype,
     resolve_model_weight_dtype,
+    run_diffusion_training_loop,
     run_sara_training,
     select_training_captions,
 )
@@ -596,6 +599,40 @@ class ConnectorTrainingTests(unittest.TestCase):
             bucket_count=3,
         )
         self.assertEqual(drop_last_plan.steps_per_epoch, 2)
+
+    def test_diffusion_loop_accumulates_and_averages_microbatches(self):
+        parameter = nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        cfg = TrainConfig(
+            gradient_accumulation_steps=2, validation_every_opt_steps=0,
+            generation_grid_every_opt_steps=0, max_samples_ella=4,
+            ella_epochs=1, ella_max_opt_steps=2, train_batch_size=1,
+            grad_clip_norm=100.0,
+        )
+        state = SimpleNamespace(cfg=cfg, device=torch.device("cpu"), wandb=None)
+        batches = [{"value": value} for value in (1.0, 3.0, 5.0, 7.0)]
+
+        def fake_step(_state, batch, _step, **_kwargs):
+            loss = parameter * batch["value"]
+            zero = loss * 0
+            return DiffusionStepOutput(
+                loss=loss, loss_diff=loss, loss_teacher=zero, loss_delta=zero,
+                loss_anchor=zero, loss_prefix=zero, loss_norm=zero,
+                clip_scaffold_scale=1.0)
+
+        with patch("train.make_streaming_dataloader", return_value=iter(batches)), \
+             patch("train.diffusion_training_step", side_effect=fake_step):
+            summary = run_diffusion_training_loop(
+                state,
+                DiffusionPhaseSpec("test", "test", "test", 1, 1, 4, 2,
+                                   0.0, False, 0.0),
+                optimizer, [parameter])
+
+        self.assertEqual(summary["steps"], 2)
+        # The second update averages 0.8 * 5 and 0.8 * 7, not just the
+        # final microbatch's 5.6 loss.
+        self.assertAlmostEqual(summary["final_loss"], 4.8)
+        self.assertAlmostEqual(parameter.item(), 0.2)
 
     def test_shared_diffusion_step_backpropagates_to_connector(self):
         class LatentDistribution:

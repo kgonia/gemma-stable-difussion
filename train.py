@@ -539,7 +539,10 @@ def connector_checkpoint_schema(state: TrainingState) -> dict:
         "connector_time_embed_dim": cfg.connector_time_embed_dim,
         "connector_dropout": cfg.connector_dropout,
         "gemma_dim": state.gemma_hidden_size,
+        "gemma_id": cfg.gemma_id,
+        "gemma_layer_index": cfg.gemma_layer_index,
         "gemma_layer_mix_count": cfg.gemma_layer_mix_count,
+        "clip_id": cfg.clip_id,
         "residual": is_residual_connector(cfg),
     }
 
@@ -888,17 +891,6 @@ def run_clip_pretrain(state: TrainingState):
     log_vram("clip_pretrain_start", 0, state)
 
     opt_step = 0
-    accumulation = cfg.gradient_accumulation_steps
-    accumulation_count = 0
-    lr_scheduler = None
-    if cfg.lr_decay_steps:
-        def lr_scale(step):
-            if step < cfg.lr_warmup_steps:
-                return float(step + 1) / max(1, cfg.lr_warmup_steps)
-            progress = (step - cfg.lr_warmup_steps) / max(
-                1, cfg.lr_decay_steps - cfg.lr_warmup_steps)
-            return max(0.0, 1.0 - progress)
-        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_scale)
     best = None
     last_pretrain = {}
     validation_sets = (
@@ -1416,6 +1408,18 @@ def run_diffusion_training_loop(
     log_vram(f"{spec.name}_start", 0, state)
 
     opt_step = 0
+    accumulation = cfg.gradient_accumulation_steps
+    accumulation_count = 0
+    microbatch_metrics = []
+    lr_scheduler = None
+    if cfg.lr_decay_steps:
+        def lr_scale(step):
+            if step < cfg.lr_warmup_steps:
+                return float(step + 1) / max(1, cfg.lr_warmup_steps)
+            progress = (step - cfg.lr_warmup_steps) / max(
+                1, cfg.lr_decay_steps - cfg.lr_warmup_steps)
+            return max(0.0, 1.0 - progress)
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_scale)
     best = None
     last_metrics = {}
     stop = False
@@ -1454,6 +1458,7 @@ def run_diffusion_training_loop(
                 clip_geom=clip_geom,
             )
             (output.loss / accumulation).backward()
+            microbatch_metrics.append(output.scalars(opt_step + 1))
             accumulation_count += 1
             if accumulation_count < accumulation:
                 continue
@@ -1465,7 +1470,12 @@ def run_diffusion_training_loop(
             accumulation_count = 0
 
             opt_step += 1
-            last_metrics = output.scalars(opt_step)
+            last_metrics = {
+                key: float(np.mean([metric[key] for metric in microbatch_metrics]))
+                for key in microbatch_metrics[0]
+            }
+            last_metrics["step"] = opt_step
+            microbatch_metrics.clear()
             last_metrics["lr"] = optimizer.param_groups[0]["lr"]
             if (is_residual_connector(cfg)
                     and cfg.residual_checkpoint_every_opt_steps
@@ -1509,6 +1519,13 @@ def run_diffusion_training_loop(
                 break
         if stop:
             break
+        if accumulation_count:
+            # Keep every optimizer update at the declared effective batch size.
+            # A partial bucket tail is intentionally not promoted to an update.
+            print(f"Dropping {accumulation_count} tail microbatch(es) below accumulation={accumulation}")
+            optimizer.zero_grad(set_to_none=True)
+            accumulation_count = 0
+            microbatch_metrics.clear()
 
     elapsed_min = (time.time() - started) / 60
     log_vram(f"{spec.name}_end", opt_step, state)
@@ -1805,6 +1822,24 @@ def run_sara_training(state: TrainingState):
 def save_checkpoint_grid(label: str, state: TrainingState):
     """Generate + save a validation image grid at a training checkpoint."""
     cfg = state.cfg
+    if is_residual_connector(cfg):
+        cases = cfg.long_eval_prompts or cfg.val_prompts
+        imgs, labels = [], []
+        for ptxt in cases:
+            prefix = _clip_visible_prefixes(state, [ptxt])[0]
+            common = dict(steps=cfg.val_steps, guidance=cfg.val_guidance,
+                          seed=cfg.val_seed)
+            imgs.extend([
+                generate_clip_teacher(ptxt, state, **common),
+                generate_ella(ptxt, state, residual_gemma_prompt=prefix, **common),
+                generate_ella(ptxt, state, **common),
+            ])
+            labels.extend(["native CLIP", "prefix-Gemma residual", "full-Gemma residual"])
+        grid_path = f"{cfg.output_dir}/{label}_residual_controls.png"
+        save_validation_grid(imgs, labels, grid_path,
+                             f"Residual controls [{label}]", cols=3)
+        print(f"Residual checkpoint grid saved: {grid_path}")
+        return
     imgs, labels = [], []
     for ptxt in cfg.val_prompts:
         imgs.append(generate_ella(ptxt, state, steps=cfg.val_steps,

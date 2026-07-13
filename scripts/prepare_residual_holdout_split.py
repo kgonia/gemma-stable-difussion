@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 IDENTITY_COLUMNS = (
-    "photo_id", "id", "image_id", "source_id", "source_identity",
+    "photo_id", "image_id", "source_id", "source_identity",
     "sha256", "image_sha256", "exact_hash", "phash", "image_phash",
 )
 
@@ -34,6 +34,14 @@ class UnionFind:
         left, right = self.find(left), self.find(right)
         if left != right:
             self.parent[right] = left
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main():
@@ -92,6 +100,9 @@ def main():
         "validation_rows": len(validation_indices),
         "train": str(train_path.resolve()),
         "validation": str(validation_path.resolve()),
+        "source_sha256": sha256_file(args.source),
+        "train_sha256": sha256_file(train_path),
+        "validation_sha256": sha256_file(validation_path),
     }
     (args.output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))

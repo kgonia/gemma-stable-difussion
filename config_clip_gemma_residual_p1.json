@@ -2,6 +2,7 @@
   "experiment_stage": "stage2_long_context_no_sara",
   "run_mode": "full_train",
   "run_clip_alignment_pretrain": false,
+  "sd_checkpoint": "/mnt/e/stable-diffusion-webui/models/Stable-diffusion/stylejourney_v10.safetensors",
   "connector_type": "clip_gemma_residual_tsc",
   "connector_width": 640,
   "connector_layers": 3,
