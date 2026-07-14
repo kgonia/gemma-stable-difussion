@@ -384,24 +384,38 @@ def load_clip(state: TrainingState):
         from safetensors import safe_open
         prefixes = ("cond_stage_model.transformer.",
                     "conditioner.embedders.0.transformer.", "text_encoder.")
+        expected = state.clip_model.state_dict()
+
+        def compatible_clip_key(raw_name: str) -> str:
+            """Map SD/Transformers 4 and 5 CLIP namespaces to this model."""
+            candidates = [raw_name]
+            if raw_name.startswith("text_model."):
+                candidates.append(raw_name.removeprefix("text_model."))
+            else:
+                candidates.append(f"text_model.{raw_name}")
+            return next((name for name in candidates if name in expected), raw_name)
+
         checkpoint_state = {}
         with safe_open(checkpoint, framework="pt", device="cpu") as handle:
             for key in handle.keys():
                 prefix = next((item for item in prefixes if key.startswith(item)), None)
                 if prefix is not None:
-                    name = key[len(prefix):].removeprefix("text_model.")
+                    name = compatible_clip_key(key[len(prefix):])
                     checkpoint_state[name] = handle.get_tensor(key)
         if not checkpoint_state:
             raise RuntimeError(f"No CLIP text encoder found in {checkpoint}")
-        expected = state.clip_model.state_dict()
         incompatible = [name for name, value in checkpoint_state.items()
                         if name in expected and expected[name].shape != value.shape]
         if incompatible:
             raise RuntimeError(f"Checkpoint CLIP tensor shape mismatch: {incompatible[:5]}")
         missing, unexpected = state.clip_model.load_state_dict(
             checkpoint_state, strict=False)
-        missing = [name for name in missing if name != "position_ids"]
-        unexpected = [name for name in unexpected if name != "text_projection.weight"]
+        is_position_id = lambda name: name.endswith("embeddings.position_ids")
+        missing = [name for name in missing if not is_position_id(name)]
+        unexpected = [
+            name for name in unexpected
+            if name != "text_projection.weight" and not is_position_id(name)
+        ]
         if missing or unexpected:
             raise RuntimeError(
                 f"Checkpoint CLIP load incomplete; missing={missing[:5]} unexpected={unexpected[:5]}")
@@ -593,6 +607,24 @@ def validate_connector_checkpoint_schema(checkpoint: dict, state: TrainingState,
         if is_residual_connector(state.cfg):
             raise RuntimeError(f"Residual checkpoint {source} has no connector_schema")
         return  # Legacy pure checkpoints remain loadable.
+    # Schema v1 predates residual CLIP-basis/scale provenance.  Continue to
+    # accept it only for pure connectors, whose old contract it fully records.
+    # Residual v1 checkpoints must be rejected because their CLIP basis and
+    # residual strength cannot be reconstructed safely for a P2 resume.
+    if (
+        actual.get("version") == 1
+        and not is_residual_connector(state.cfg)
+        and not actual.get("residual", False)
+    ):
+        legacy_expected = expected.copy()
+        legacy_expected.update({"version": 1})
+        for key in (
+            "use_sd_checkpoint_text_encoder", "sd_checkpoint",
+            "residual_strength",
+        ):
+            legacy_expected.pop(key)
+        if actual == legacy_expected:
+            return
     if actual != expected:
         raise RuntimeError(
             f"Connector checkpoint schema mismatch for {source}: "
@@ -1377,7 +1409,9 @@ def diffusion_training_step(
         loss_norm=loss_norm,
         clip_scaffold_scale=scaffold_scale,
         residual_norm_ratio=residual_norm_ratio,
-        timesteps=timestep,
+        # residual_norm_ratio has one value per long prompt only; retain the
+        # matching timesteps so mixed short/long batches cannot mis-bucket it.
+        timesteps=timestep[long_mask] if residual_norm_ratio is not None else None,
     )
 
 
@@ -1754,6 +1788,12 @@ def run_ella_training(state: TrainingState):
         "camera_condition_schema": _camera_schema(state),
         "config": cfg.to_dict(),
         "stage": "ella_frozen_unet",
+        "completion": {
+            "completed": True,
+            "phase": "ella",
+            "optimizer_steps": ella_summary["steps"],
+            "best_loss": ella_summary["best_loss"],
+        },
     }, ckpt_path)
     ella_summary["checkpoint_saved"] = ckpt_path
     remember_final_summary(
@@ -2404,16 +2444,33 @@ def validate_residual_sara_resume(
     but that conflates P1's suffix-conditioning falsifier with U-Net capacity
     growth and makes its provenance unusable.
     """
-    if (
+    requires_handoff = (
         cfg.run_training
         and cfg.run_sara_phase
         and "sara" in phases_requested
         and is_residual_connector(cfg)
-        and not resume_path
-    ):
+    )
+    if not requires_handoff:
+        return
+    if not resume_path:
         raise ValueError(
             "stage3 residual SaRA requires --resume-ckpt or "
             "init_connector_ckpt_path from a completed P1 connector run"
+        )
+    if not os.path.isfile(resume_path):
+        raise ValueError(f"stage3 residual SaRA P1 checkpoint not found: {resume_path}")
+    checkpoint = torch.load(resume_path, map_location="cpu", weights_only=True)
+    completion = checkpoint.get("completion")
+    if (
+        checkpoint.get("stage") != "ella_frozen_unet"
+        or not isinstance(completion, dict)
+        or completion.get("completed") is not True
+        or completion.get("phase") != "ella"
+    ):
+        raise ValueError(
+            "stage3 residual SaRA requires the completed P1 "
+            "ella_connector_frozen_unet.pt checkpoint, not an intermediate "
+            "or later-stage artifact"
         )
 
 

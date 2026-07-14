@@ -720,6 +720,19 @@ class ConnectorTrainingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "schema mismatch"):
             validate_connector_checkpoint_schema(checkpoint, changed_scale, "test.pt")
 
+    def test_schema_v1_pure_connector_checkpoint_remains_loadable(self):
+        cfg = TrainConfig(connector_type="ella_tsc")
+        state = SimpleNamespace(cfg=cfg, gemma_hidden_size=1152)
+        legacy_schema = connector_checkpoint_schema(state)
+        legacy_schema["version"] = 1
+        for key in (
+            "use_sd_checkpoint_text_encoder", "sd_checkpoint",
+            "residual_strength",
+        ):
+            legacy_schema.pop(key)
+        validate_connector_checkpoint_schema(
+            {"connector_schema": legacy_schema}, state, "pure-v1.pt")
+
     def test_residual_sara_requires_p1_resume(self):
         cfg = TrainConfig(
             experiment_stage="stage3_long_context_with_sara",
@@ -729,7 +742,22 @@ class ConnectorTrainingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "requires --resume-ckpt"):
             validate_residual_sara_resume(cfg, {"sara"}, "")
-        validate_residual_sara_resume(cfg, {"sara"}, "/tmp/p1.pt")
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_path = Path(directory) / "p1.pt"
+            torch.save({
+                "stage": "ella_frozen_unet",
+                "completion": {"completed": True, "phase": "ella"},
+            }, checkpoint_path)
+            validate_residual_sara_resume(
+                cfg, {"sara"}, str(checkpoint_path))
+
+            torch.save({
+                "stage": "clip_gemma_residual_frozen_unet",
+                "completion": {"completed": True, "phase": "ella"},
+            }, checkpoint_path)
+            with self.assertRaisesRegex(ValueError, "intermediate"):
+                validate_residual_sara_resume(
+                    cfg, {"sara"}, str(checkpoint_path))
 
     def test_paired_evaluator_uses_exact_sign_test_and_content_mask(self):
         p_value, wins, losses, non_ties = exact_sign_test_two_sided(
