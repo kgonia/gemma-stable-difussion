@@ -182,6 +182,8 @@ class DiffusionStepOutput:
     loss_prefix: torch.Tensor
     loss_norm: torch.Tensor
     clip_scaffold_scale: float
+    residual_norm_ratio: Optional[torch.Tensor] = None
+    timesteps: Optional[torch.Tensor] = None
 
     def scalars(self, step: int) -> dict:
         return {
@@ -375,6 +377,35 @@ def load_clip(state: TrainingState):
         cfg.clip_id, torch_dtype=state.unet_dtype,
         token=os.environ.get("HF_TOKEN"),
     ).to(state.device).eval()
+    if cfg.use_sd_checkpoint_text_encoder:
+        checkpoint = resolve_sd_checkpoint(cfg)
+        if not checkpoint.endswith(".safetensors"):
+            raise ValueError("use_sd_checkpoint_text_encoder requires a single-file safetensors checkpoint")
+        from safetensors import safe_open
+        prefixes = ("cond_stage_model.transformer.",
+                    "conditioner.embedders.0.transformer.", "text_encoder.")
+        checkpoint_state = {}
+        with safe_open(checkpoint, framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                prefix = next((item for item in prefixes if key.startswith(item)), None)
+                if prefix is not None:
+                    name = key[len(prefix):].removeprefix("text_model.")
+                    checkpoint_state[name] = handle.get_tensor(key)
+        if not checkpoint_state:
+            raise RuntimeError(f"No CLIP text encoder found in {checkpoint}")
+        expected = state.clip_model.state_dict()
+        incompatible = [name for name, value in checkpoint_state.items()
+                        if name in expected and expected[name].shape != value.shape]
+        if incompatible:
+            raise RuntimeError(f"Checkpoint CLIP tensor shape mismatch: {incompatible[:5]}")
+        missing, unexpected = state.clip_model.load_state_dict(
+            checkpoint_state, strict=False)
+        missing = [name for name in missing if name != "position_ids"]
+        unexpected = [name for name in unexpected if name != "text_projection.weight"]
+        if missing or unexpected:
+            raise RuntimeError(
+                f"Checkpoint CLIP load incomplete; missing={missing[:5]} unexpected={unexpected[:5]}")
+        print("Loaded CLIP text encoder weights from SD checkpoint")
     for p in state.clip_model.parameters():
         p.requires_grad_(False)
     print("CLIP loaded as teacher/diagnostic only")
@@ -528,7 +559,11 @@ def connector_checkpoint_schema(state: TrainingState) -> dict:
     """Versioned architecture identity; prevents silent pure/residual mixes."""
     cfg = state.cfg
     return {
-        "version": 1,
+        # The residual is meaningful only in the CLIP coordinate system and at
+        # the composition scale it was trained with.  Keep these provenance
+        # fields in the strict schema so a P2 resume cannot silently swap the
+        # StyleJourney text encoder for stock OpenAI CLIP (or alter delta gain).
+        "version": 2,
         "connector_type": cfg.connector_type,
         "context_tokens": cfg.context_tokens,
         "clip_anchor_tokens": cfg.clip_anchor_tokens,
@@ -543,7 +578,10 @@ def connector_checkpoint_schema(state: TrainingState) -> dict:
         "gemma_layer_index": cfg.gemma_layer_index,
         "gemma_layer_mix_count": cfg.gemma_layer_mix_count,
         "clip_id": cfg.clip_id,
+        "use_sd_checkpoint_text_encoder": cfg.use_sd_checkpoint_text_encoder,
+        "sd_checkpoint": os.path.abspath(os.path.expanduser(cfg.sd_checkpoint)),
         "residual": is_residual_connector(cfg),
+        "residual_strength": cfg.residual_strength,
     }
 
 
@@ -1221,6 +1259,7 @@ def diffusion_training_step(
     loss_anchor = noise.new_tensor(0.0)
     loss_prefix = noise.new_tensor(0.0)
     loss_norm = noise.new_tensor(0.0)
+    residual_norm_ratio = None
 
     with model_autocast(state):
         if is_residual_connector(cfg):
@@ -1236,6 +1275,9 @@ def diffusion_training_step(
                     cfg.residual_strength * delta_full).detach()
                 loss_prefix = normalized_residual_square(delta_prefix, clip_long)
                 loss_norm = normalized_residual_square(delta_full, clip_long)
+                residual_norm_ratio = (
+                    delta_full.float().square().mean(dim=(1, 2)).sqrt()
+                    / clip_long.float().square().mean(dim=(1, 2)).sqrt().clamp_min(1e-8))
             scaffold_scale = 1.0
         elif use_teacher_delta:
             empty = [""] * len(captions)
@@ -1334,6 +1376,8 @@ def diffusion_training_step(
         loss_prefix=loss_prefix,
         loss_norm=loss_norm,
         clip_scaffold_scale=scaffold_scale,
+        residual_norm_ratio=residual_norm_ratio,
+        timesteps=timestep,
     )
 
 
@@ -1411,6 +1455,12 @@ def run_diffusion_training_loop(
     accumulation = cfg.gradient_accumulation_steps
     accumulation_count = 0
     microbatch_metrics = []
+    # These counters deliberately cover one logging window, not the entire
+    # run.  A cumulative average would hide a late residual blow-up behind its
+    # zero-initialized early updates.
+    drift_sums = {f"t{start:03d}_{start + 249:03d}": 0.0
+                  for start in range(0, 1000, 250)}
+    drift_counts = {key: 0 for key in drift_sums}
     lr_scheduler = None
     if cfg.lr_decay_steps:
         def lr_scale(step):
@@ -1459,6 +1509,14 @@ def run_diffusion_training_loop(
             )
             (output.loss / accumulation).backward()
             microbatch_metrics.append(output.scalars(opt_step + 1))
+            if output.residual_norm_ratio is not None:
+                for ratio, timestep_value in zip(
+                        output.residual_norm_ratio.detach().cpu().tolist(),
+                        output.timesteps.detach().cpu().tolist()):
+                    start = min(750, int(timestep_value) // 250 * 250)
+                    bucket = f"t{start:03d}_{start + 249:03d}"
+                    drift_sums[bucket] += ratio
+                    drift_counts[bucket] += 1
             accumulation_count += 1
             if accumulation_count < accumulation:
                 continue
@@ -1489,6 +1547,26 @@ def run_diffusion_training_loop(
             )
 
             if opt_step % 25 == 0:
+                drift_metrics = {
+                    f"{spec.name}/residual_rms_ratio_{bucket}": drift_sums[bucket] / drift_counts[bucket]
+                    for bucket in drift_sums if drift_counts[bucket]
+                }
+                if drift_metrics:
+                    maximum = max(drift_metrics.values())
+                    if maximum > cfg.residual_drift_warn_ratio:
+                        print(f"WARNING: residual RMS/CLIP RMS={maximum:.3f} exceeds "
+                              f"warn={cfg.residual_drift_warn_ratio:.3f}")
+                    if maximum > cfg.residual_drift_stop_ratio:
+                        # Do not let an unattended run continue after the
+                        # explicit safety gate.  Periodic residual checkpoints
+                        # before this point remain the rollback candidates;
+                        # the current in-memory state is deliberately not
+                        # promoted to one.
+                        stop_message = (
+                            "Residual drift stop: window RMS(delta)/RMS(CLIP)="
+                            f"{maximum:.3f} exceeds "
+                            f"threshold={cfg.residual_drift_stop_ratio:.3f}"
+                        )
                 safe_wandb_log({
                     f"{spec.name}/step": opt_step,
                     f"{spec.name}/loss": last_metrics["loss"],
@@ -1502,7 +1580,15 @@ def run_diffusion_training_loop(
                         "clip_scaffold_scale"
                     ],
                     f"{spec.name}/lr": last_metrics["lr"],
+                    **drift_metrics,
                 }, wandb=state.wandb)
+                # Reset after logging so the next threshold applies to fresh
+                # optimizer updates rather than a diluted whole-run average.
+                for bucket in drift_sums:
+                    drift_sums[bucket] = 0.0
+                    drift_counts[bucket] = 0
+                if drift_metrics and maximum > cfg.residual_drift_stop_ratio:
+                    raise RuntimeError(stop_message)
 
             _run_periodic_training_validation(
                 state, spec.name, opt_step, last_metrics
@@ -1831,7 +1917,8 @@ def save_checkpoint_grid(label: str, state: TrainingState):
                           seed=cfg.val_seed)
             imgs.extend([
                 generate_clip_teacher(ptxt, state, **common),
-                generate_ella(ptxt, state, residual_gemma_prompt=prefix, **common),
+                generate_ella(ptxt, state, residual_gemma_prompt=prefix,
+                              force_residual=True, **common),
                 generate_ella(ptxt, state, **common),
             ])
             labels.extend(["native CLIP", "prefix-Gemma residual", "full-Gemma residual"])
@@ -2308,6 +2395,28 @@ def _load_connector_checkpoint(state: TrainingState, ckpt_path: str):
     return True
 
 
+def validate_residual_sara_resume(
+    cfg: TrainConfig, phases_requested: set[str], resume_path: str,
+) -> None:
+    """Require the proven P1 connector before residual sparse-U-Net P2.
+
+    SaRA can technically optimize a freshly initialized residual connector,
+    but that conflates P1's suffix-conditioning falsifier with U-Net capacity
+    growth and makes its provenance unusable.
+    """
+    if (
+        cfg.run_training
+        and cfg.run_sara_phase
+        and "sara" in phases_requested
+        and is_residual_connector(cfg)
+        and not resume_path
+    ):
+        raise ValueError(
+            "stage3 residual SaRA requires --resume-ckpt or "
+            "init_connector_ckpt_path from a completed P1 connector run"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="pure-ella: Gemma -> SD training")
@@ -2343,6 +2452,11 @@ def main():
     seed_everything(cfg.base_seed)
 
     resume_path = args.resume_ckpt or cfg.init_connector_ckpt_path
+    try:
+        validate_residual_sara_resume(cfg, phases_requested, resume_path)
+    except ValueError as error:
+        print(f"ERROR: {error}")
+        sys.exit(1)
     pretrain_will_run = (
         "pretrain" in phases_requested
         and cfg.run_clip_alignment_pretrain

@@ -12,6 +12,7 @@ from transformers import BatchEncoding
 
 from train import (
     _validate_camera_checkpoint_schema,
+    connector_checkpoint_schema,
     diffusion_training_step,
     DiffusionPhaseSpec,
     DiffusionStepOutput,
@@ -23,6 +24,8 @@ from train import (
     run_diffusion_training_loop,
     run_sara_training,
     select_training_captions,
+    validate_connector_checkpoint_schema,
+    validate_residual_sara_resume,
 )
 from pure_ella.config import TrainConfig, resolve_sd_checkpoint
 from pure_ella.camera import (
@@ -57,6 +60,10 @@ from pure_ella.diagnostics import (
     validate_suffix_counterfactual_token_boundaries,
 )
 from scripts.audit_camera_metadata import classify_geometry_record
+from scripts.evaluate_residual_paired import (
+    exact_sign_test_two_sided,
+    masked_per_sample_mse,
+)
 from pure_ella.sara import (
     build_sara_attn2_kv_sparse_masks,
     capture_sara_selected_values,
@@ -633,6 +640,108 @@ class ConnectorTrainingTests(unittest.TestCase):
         # final microbatch's 5.6 loss.
         self.assertAlmostEqual(summary["final_loss"], 4.8)
         self.assertAlmostEqual(parameter.item(), 0.2)
+
+    def test_residual_drift_uses_a_window_and_aborts(self):
+        parameter = nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        cfg = TrainConfig(
+            connector_type="clip_gemma_residual_tsc",
+            run_clip_alignment_pretrain=False,
+            conditioning_dropout_prob=0.0,
+            gradient_accumulation_steps=1, validation_every_opt_steps=0,
+            generation_grid_every_opt_steps=0, max_samples_ella=50,
+            ella_epochs=1, ella_max_opt_steps=50, train_batch_size=1,
+            residual_drift_warn_ratio=0.1,
+            residual_drift_stop_ratio=0.2,
+            grad_clip_norm=100.0,
+        )
+        state = SimpleNamespace(cfg=cfg, device=torch.device("cpu"), wandb=None)
+        batches = [{"ratio": 0.0}] * 25 + [{"ratio": 0.3}] * 25
+
+        def fake_step(_state, batch, _step, **_kwargs):
+            loss = parameter * 0
+            return DiffusionStepOutput(
+                loss=loss, loss_diff=loss, loss_teacher=loss, loss_delta=loss,
+                loss_anchor=loss, loss_prefix=loss, loss_norm=loss,
+                clip_scaffold_scale=1.0,
+                residual_norm_ratio=torch.tensor([batch["ratio"]]),
+                timesteps=torch.tensor([500]),
+            )
+
+        with patch("train.make_streaming_dataloader", return_value=iter(batches)), \
+             patch("train.diffusion_training_step", side_effect=fake_step):
+            # A cumulative mean would be 0.15 here and miss the 0.2 gate.
+            # The second 25-step window is 0.3 and must abort.
+            with self.assertRaisesRegex(RuntimeError, "Residual drift stop"):
+                run_diffusion_training_loop(
+                    state,
+                    DiffusionPhaseSpec("test", "test", "test", 1, 1, 50, 50,
+                                       0.0, False, 0.0),
+                    optimizer, [parameter])
+
+    def test_residual_checkpoint_schema_pins_clip_basis_and_scale(self):
+        cfg = TrainConfig(
+            connector_type="clip_gemma_residual_tsc",
+            run_clip_alignment_pretrain=False,
+            conditioning_dropout_prob=0.0,
+            sd_checkpoint="/tmp/stylejourney.safetensors",
+            use_sd_checkpoint_text_encoder=True,
+            residual_strength=0.75,
+        )
+        state = SimpleNamespace(cfg=cfg, gemma_hidden_size=1152)
+        checkpoint = {"connector_schema": connector_checkpoint_schema(state)}
+        validate_connector_checkpoint_schema(checkpoint, state, "test.pt")
+
+        changed_basis = SimpleNamespace(
+            cfg=TrainConfig(
+                connector_type="clip_gemma_residual_tsc",
+                run_clip_alignment_pretrain=False,
+                conditioning_dropout_prob=0.0,
+                sd_checkpoint="/tmp/stylejourney.safetensors",
+                use_sd_checkpoint_text_encoder=False,
+                residual_strength=0.75,
+            ),
+            gemma_hidden_size=1152,
+        )
+        with self.assertRaisesRegex(RuntimeError, "schema mismatch"):
+            validate_connector_checkpoint_schema(checkpoint, changed_basis, "test.pt")
+
+        changed_scale = SimpleNamespace(
+            cfg=TrainConfig(
+                connector_type="clip_gemma_residual_tsc",
+                run_clip_alignment_pretrain=False,
+                conditioning_dropout_prob=0.0,
+                sd_checkpoint="/tmp/stylejourney.safetensors",
+                use_sd_checkpoint_text_encoder=True,
+                residual_strength=1.0,
+            ),
+            gemma_hidden_size=1152,
+        )
+        with self.assertRaisesRegex(RuntimeError, "schema mismatch"):
+            validate_connector_checkpoint_schema(checkpoint, changed_scale, "test.pt")
+
+    def test_residual_sara_requires_p1_resume(self):
+        cfg = TrainConfig(
+            experiment_stage="stage3_long_context_with_sara",
+            connector_type="clip_gemma_residual_tsc",
+            run_clip_alignment_pretrain=False,
+            conditioning_dropout_prob=0.0,
+        )
+        with self.assertRaisesRegex(ValueError, "requires --resume-ckpt"):
+            validate_residual_sara_resume(cfg, {"sara"}, "")
+        validate_residual_sara_resume(cfg, {"sara"}, "/tmp/p1.pt")
+
+    def test_paired_evaluator_uses_exact_sign_test_and_content_mask(self):
+        p_value, wins, losses, non_ties = exact_sign_test_two_sided(
+            torch.tensor([1.0, 1.0, 1.0, 1.0, 0.0]).numpy())
+        self.assertEqual((wins, losses, non_ties), (4, 0, 4))
+        self.assertAlmostEqual(p_value, 0.125)
+        prediction = torch.tensor([[[[1.0, 100.0]]]])
+        target = torch.zeros_like(prediction)
+        mask = torch.tensor([[[[1.0, 0.0]]]])
+        self.assertTrue(torch.equal(
+            masked_per_sample_mse(prediction, target, mask),
+            torch.tensor([1.0])))
 
     def test_shared_diffusion_step_backpropagates_to_connector(self):
         class LatentDistribution:

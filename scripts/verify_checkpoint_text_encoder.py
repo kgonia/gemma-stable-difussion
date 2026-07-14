@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 import torch
-from diffusers import StableDiffusionPipeline
+from safetensors import safe_open
 from transformers import CLIPTextModel
 
 
@@ -30,13 +30,27 @@ def main():
     args = parser.parse_args()
     if not args.checkpoint.is_file():
         raise FileNotFoundError(args.checkpoint)
+    prefixes = (
+        "cond_stage_model.transformer.",
+        "conditioner.embedders.0.transformer.",
+        "text_encoder.",
+    )
+    checkpoint_state = {}
+    with safe_open(str(args.checkpoint), framework="pt", device="cpu") as handle:
+        for key in handle.keys():
+            prefix = next((value for value in prefixes if key.startswith(value)), None)
+            if prefix is None:
+                continue
+            name = key[len(prefix):]
+            # Transformers 4 used a text_model namespace; Transformers 5's
+            # CLIPTextModel exposes those modules directly.
+            if name.startswith("text_model."):
+                name = name[len("text_model."):]
+            checkpoint_state[name] = handle.get_tensor(key)
+    if not checkpoint_state:
+        raise RuntimeError("Checkpoint contains no recognized CLIP text-encoder tensors")
     # local_files_only makes this a provenance check, not an accidental download.
-    pipe = StableDiffusionPipeline.from_single_file(
-        str(args.checkpoint), torch_dtype=torch.float32, local_files_only=True,
-        safety_checker=None, feature_extractor=None, requires_safety_checker=False)
-    checkpoint_encoder = pipe.text_encoder
     reference_encoder = CLIPTextModel.from_pretrained(args.clip_id, local_files_only=True)
-    checkpoint_state = checkpoint_encoder.state_dict()
     reference_state = reference_encoder.state_dict()
     common = sorted(set(checkpoint_state) & set(reference_state))
     changed = [name for name in common if not torch.equal(checkpoint_state[name].cpu(), reference_state[name].cpu())]

@@ -84,6 +84,7 @@ class TrainConfig:
     max_gemma_len: int = 336
     fail_on_prompt_truncation: bool = True
     clip_id: str = "openai/clip-vit-large-patch14"
+    use_sd_checkpoint_text_encoder: bool = False
     sd_checkpoint: str = ""  # path to .safetensors SD checkpoint, empty = use runwayml/stable-diffusion-v1-5
     model_weight_dtype: Literal["float32", "bfloat16"] = "float32"
     mixed_precision: Literal["no", "bf16"] = "no"
@@ -116,6 +117,8 @@ class TrainConfig:
     residual_norm_weight: float = 0.01
     residual_penalty_floor: float = 0.0
     residual_checkpoint_every_opt_steps: int = 250
+    residual_drift_warn_ratio: float = 0.25
+    residual_drift_stop_ratio: float = 0.5
 
     # --- Learning rates ---
     pretrain_lr: float = 1e-4
@@ -320,6 +323,11 @@ class TrainConfig:
                     "for the strict residual falsifier")
             if self.connector_width <= 0 or self.connector_layers <= 0:
                 raise ValueError("residual connector width and layers must be positive")
+            if self.use_clip_teacher_delta:
+                raise ValueError(
+                    "clip_gemma_residual_tsc does not use the CLIP teacher "
+                    "delta; set use_clip_teacher_delta=false"
+                )
         if self.residual_strength < 0:
             raise ValueError("residual_strength must be non-negative")
         if min(self.residual_prefix_weight, self.residual_norm_weight,
@@ -327,6 +335,8 @@ class TrainConfig:
             raise ValueError("residual penalty weights must be non-negative")
         if self.residual_checkpoint_every_opt_steps < 0:
             raise ValueError("residual_checkpoint_every_opt_steps must be non-negative")
+        if not (0 <= self.residual_drift_warn_ratio <= self.residual_drift_stop_ratio):
+            raise ValueError("residual drift thresholds must satisfy 0 <= warn <= stop")
         if self.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be at least 1")
         if self.lr_warmup_steps < 0 or self.lr_decay_steps < 0:

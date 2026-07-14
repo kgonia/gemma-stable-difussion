@@ -238,6 +238,7 @@ def generate_ella(
     context_tokens: int = None,
     camera_condition: torch.Tensor = None,
     residual_gemma_prompt: str | None = None,
+    force_residual: bool = False,
 ) -> Image.Image:
     """Generate an image from the ELLA connector + frozen UNet."""
     connector = state.connector
@@ -267,7 +268,7 @@ def generate_ella(
         gemma_prompt = residual_gemma_prompt or prompt
         clip_cond, _ = state.encode_clip([prompt])
         clip_uncond, _ = state.encode_clip([negative_prompt])
-        cond_long = len(state.clip_tokenizer([gemma_prompt], truncation=False)["input_ids"][0]) > state.cfg.clip_anchor_tokens
+        cond_long = force_residual or len(state.clip_tokenizer([gemma_prompt], truncation=False)["input_ids"][0]) > state.cfg.clip_anchor_tokens
         uncond_long = len(state.clip_tokenizer([negative_prompt], truncation=False)["input_ids"][0]) > state.cfg.clip_anchor_tokens
         if cond_long:
             gh, gm = encode_gemma([gemma_prompt])
