@@ -80,12 +80,93 @@ from pure_ella.longclip_sara import (
     LONGCLIP_L_CONTEXT_TOKENS,
     LONGCLIP_L_WIDTH,
     LongClipSaraConfig,
+    is_longclip_context_overflow,
+    longclip_attention_mask,
     longclip_sara_schema,
     validate_longclip_sara_checkpoint,
+)
+from scripts.train_longclip_sara import (
+    fixed_validation_timesteps,
+    heldout_diffusion_loss,
+    validation_skip_reason,
 )
 
 
 class ConnectorTrainingTests(unittest.TestCase):
+    def test_longclip_mask_uses_eot_position_not_nonzero_tokens(self):
+        tokens = torch.tensor([
+            [49406, 0, 12, 49407, 0, 0],
+            [49406, 42, 49407, 0, 0, 0],
+        ])
+        mask = longclip_attention_mask(tokens)
+        self.assertEqual(mask.tolist(), [
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 0, 0, 0],
+        ])
+        self.assertTrue(is_longclip_context_overflow(RuntimeError(
+            "Input x is too long for context length 248")))
+        self.assertFalse(is_longclip_context_overflow(RuntimeError("CUDA failed")))
+
+    def test_longclip_validation_is_fixed_and_preserves_global_rng(self):
+        cfg = LongClipSaraConfig(
+            sd_checkpoint="stylejourney.safetensors",
+            longclip_repo="repo", longclip_checkpoint="model.pt",
+            output_dir="output", data_sources=["train.parquet"],
+            validation_data_sources=["validation.parquet"],
+            validation_max_samples=2, train_batch_size=2,
+            aspect_ratio_buckets=[(64, 64)], max_image_dimension=64,
+        )
+
+        class Distribution:
+            def __init__(self, value): self.value = value
+            def mode(self): return self.value
+
+        class VAE:
+            config = SimpleNamespace(scaling_factor=1.0)
+            def encode(self, image):
+                return SimpleNamespace(latent_dist=Distribution(image))
+
+        class Scheduler:
+            config = SimpleNamespace(num_train_timesteps=1000)
+            def add_noise(self, latent, noise, timestep):
+                return latent + noise
+
+        class UNet(nn.Module):
+            def forward(self, sample, timestep, encoder_hidden_states,
+                        class_labels=None):
+                return SimpleNamespace(sample=torch.zeros_like(sample))
+
+        state = SimpleNamespace(
+            cfg=cfg, device=torch.device("cpu"), unet_dtype=torch.float32,
+            autocast_dtype=None, unet=UNet(), vae=VAE(), scheduler=Scheduler(),
+        )
+        batch = {
+            "caption": ["first long caption", "second long caption"],
+            "image": torch.zeros(2, 4, 2, 2),
+        }
+        encoder = SimpleNamespace(encode=lambda captions: (
+            torch.zeros(len(captions), 248, 768),
+            torch.ones(len(captions), 248, dtype=torch.long),
+        ))
+        torch.manual_seed(919)
+        before = torch.random.get_rng_state().clone()
+        with patch(
+                "scripts.train_longclip_sara.make_streaming_dataloader",
+                return_value=[batch]):
+            first = heldout_diffusion_loss(state, cfg, encoder, opt_step=250)
+            middle = torch.random.get_rng_state().clone()
+            second = heldout_diffusion_loss(state, cfg, encoder, opt_step=500)
+            after = torch.random.get_rng_state().clone()
+
+        self.assertEqual(first, second)
+        self.assertTrue(torch.equal(before, middle))
+        self.assertTrue(torch.equal(before, after))
+        self.assertEqual(
+            fixed_validation_timesteps(5, 1000, torch.device("cpu")).tolist(),
+            [0, 250, 500, 749, 999])
+        cfg.validation_max_samples = 0
+        self.assertEqual(validation_skip_reason(cfg), "validation_max_samples=0")
+
     def test_longclip_sara_config_keeps_the_native_direct_contract(self):
         cfg = LongClipSaraConfig(
             sd_checkpoint="stylejourney.safetensors",

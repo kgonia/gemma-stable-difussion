@@ -31,6 +31,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def longclip_attention_mask(tokens: torch.Tensor) -> torch.Tensor:
+    """Mask through EOT without assuming token id 0 is always padding.
+
+    CLIP's EOT id is the largest vocabulary id, so ``argmax`` is the official
+    pooling convention and remains correct when a real content token has id 0.
+    """
+    if tokens.ndim != 2:
+        raise ValueError(f"LongCLIP tokens must be rank 2, got {tokens.shape}")
+    eot_positions = tokens.argmax(dim=-1)
+    positions = torch.arange(tokens.shape[1], device=tokens.device)
+    return (positions.unsqueeze(0) <= eot_positions.unsqueeze(1)).long()
+
+
+def is_longclip_context_overflow(error: RuntimeError) -> bool:
+    return f"too long for context length {LONGCLIP_L_CONTEXT_TOKENS}" in str(error)
+
+
 @dataclass
 class LongClipSaraConfig:
     """Configuration for direct LongCLIP-L + sparse-SaRA adaptation."""
@@ -174,7 +191,9 @@ class LongClipEncoder:
             tokens = self._longclip.tokenize(
                 prompts, context_length=LONGCLIP_L_CONTEXT_TOKENS,
                 truncate=False)
-        except RuntimeError:
+        except RuntimeError as error:
+            if not is_longclip_context_overflow(error):
+                raise
             if self.fail_on_truncation:
                 raise
             overlong = 0
@@ -183,7 +202,9 @@ class LongClipEncoder:
                     self._longclip.tokenize(
                         [prompt], context_length=LONGCLIP_L_CONTEXT_TOKENS,
                         truncate=False)
-                except RuntimeError:
+                except RuntimeError as prompt_error:
+                    if not is_longclip_context_overflow(prompt_error):
+                        raise
                     overlong += 1
             self.truncated_prompt_count += overlong
             if self.truncated_prompt_count == overlong:
@@ -195,7 +216,8 @@ class LongClipEncoder:
                 prompts, context_length=LONGCLIP_L_CONTEXT_TOKENS,
                 truncate=True)
         tokens = tokens.to(self.device)
-        lengths = tokens.ne(0).sum(dim=1)
+        attention_mask = longclip_attention_mask(tokens)
+        lengths = attention_mask.sum(dim=1)
         self.max_observed_tokens = max(self.max_observed_tokens, int(lengths.max()))
         states = self.model.encode_text_full(tokens)
         expected = (len(prompts), LONGCLIP_L_CONTEXT_TOKENS, LONGCLIP_L_WIDTH)
@@ -205,7 +227,7 @@ class LongClipEncoder:
                 f"got {tuple(states.shape)}")
         if not torch.isfinite(states).all():
             raise RuntimeError("LongCLIP emitted NaN/Inf conditioning")
-        return states, tokens.ne(0).long()
+        return states, attention_mask
 
     def provenance(self) -> dict:
         return {

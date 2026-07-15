@@ -13,7 +13,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -86,48 +85,96 @@ def save_visual_check(state, cfg):
         "LongCLIP-L direct conditioning + sparse SaRA", cols=2)
 
 
+def validation_skip_reason(cfg) -> str | None:
+    if not cfg.validation_data_sources:
+        return "no validation_data_sources"
+    if cfg.validation_max_samples == 0:
+        return "validation_max_samples=0"
+    return None
+
+
+def deterministic_validation_captions(batch: dict) -> list[str]:
+    """Use the same long caption on every validation pass."""
+    return _as_prompt_list(batch["caption"])
+
+
+def fixed_validation_timesteps(total: int, num_train_timesteps: int,
+                               device: torch.device) -> torch.Tensor:
+    """Cover the full diffusion trajectory with a stable sample assignment."""
+    if total <= 0:
+        return torch.empty(0, device=device, dtype=torch.long)
+    return torch.linspace(
+        0, num_train_timesteps - 1, steps=total,
+        device=device, dtype=torch.float64).round().long()
+
+
 @torch.no_grad()
 def heldout_diffusion_loss(state, cfg, encoder, opt_step: int) -> float | None:
     """Compute masked denoising MSE on the configured held-out parquet split."""
-    if not cfg.validation_data_sources or cfg.validation_max_samples == 0:
+    if validation_skip_reason(cfg) is not None:
         return None
     was_training = state.unet.training
     state.unet.eval()
-    values = []
+    weighted_loss = 0.0
+    sample_count = 0
+    generator = torch.Generator(device=state.device).manual_seed(cfg.val_seed)
+    timestep_grid = fixed_validation_timesteps(
+        cfg.validation_max_samples,
+        state.scheduler.config.num_train_timesteps,
+        state.device)
+    cuda_devices = []
+    if state.device.type == "cuda":
+        cuda_devices = [
+            state.device.index
+            if state.device.index is not None else torch.cuda.current_device()
+        ]
     try:
-        loader = make_streaming_dataloader(
-            cfg.validation_data_sources, phase=41, epoch=0,
-            max_samples=cfg.validation_max_samples,
-            batch_size=cfg.train_batch_size, shuffle=False, shuffle_buffer=1,
-            base_seed=cfg.base_seed + opt_step,
-            buckets=cfg.aspect_ratio_buckets,
-            drop_last=False, max_image_dimension=cfg.max_image_dimension)
-        for batch in loader:
-            captions = select_training_captions(batch, state)
-            image = batch["image"].to(device=state.device, dtype=state.unet_dtype)
-            image_mask = batch.get("image_mask")
-            if image_mask is not None:
-                image_mask = image_mask.to(device=state.device)
-            with model_autocast(state):
-                latent = state.vae.encode(image).latent_dist.sample()
-                latent = latent * state.vae.config.scaling_factor
-            noise = torch.randn_like(latent)
-            timestep = torch.randint(
-                0, state.scheduler.config.num_train_timesteps,
-                (len(captions),), device=state.device).long()
-            noisy = state.scheduler.add_noise(latent, noise, timestep)
-            context, _ = encoder.encode(captions)
-            with model_autocast(state):
-                prediction = camera_conditioned_unet(
-                    state.unet, noisy, timestep,
-                    encoder_hidden_states=context.to(dtype=state.unet_dtype),
-                ).sample
-                values.append(float(masked_mse(prediction, noise, image_mask).item()))
+        # Restore CPU/CUDA global RNG even if a future validation component
+        # accidentally draws from it.  All intended randomness uses the local
+        # generator above.
+        with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+            loader = make_streaming_dataloader(
+                cfg.validation_data_sources, phase=41, epoch=0,
+                max_samples=cfg.validation_max_samples,
+                batch_size=cfg.train_batch_size, shuffle=False, shuffle_buffer=1,
+                base_seed=cfg.base_seed,
+                buckets=cfg.aspect_ratio_buckets,
+                drop_last=False, max_image_dimension=cfg.max_image_dimension)
+            for batch in loader:
+                captions = deterministic_validation_captions(batch)
+                batch_size = len(captions)
+                image = batch["image"].to(
+                    device=state.device, dtype=state.unet_dtype)
+                image_mask = batch.get("image_mask")
+                if image_mask is not None:
+                    image_mask = image_mask.to(device=state.device)
+                with model_autocast(state):
+                    latent = state.vae.encode(image).latent_dist.mode()
+                    latent = latent * state.vae.config.scaling_factor
+                noise = torch.randn(
+                    latent.shape, generator=generator, device=state.device,
+                    dtype=latent.dtype)
+                timestep = timestep_grid[
+                    sample_count:sample_count + batch_size]
+                if len(timestep) != batch_size:
+                    raise RuntimeError(
+                        "Held-out loader exceeded validation_max_samples")
+                noisy = state.scheduler.add_noise(latent, noise, timestep)
+                context, _ = encoder.encode(captions)
+                with model_autocast(state):
+                    prediction = camera_conditioned_unet(
+                        state.unet, noisy, timestep,
+                        encoder_hidden_states=context.to(dtype=state.unet_dtype),
+                    ).sample
+                    batch_loss = float(
+                        masked_mse(prediction, noise, image_mask).item())
+                weighted_loss += batch_loss * batch_size
+                sample_count += batch_size
     finally:
         state.unet.train(was_training)
-    if not values:
+    if not sample_count:
         raise RuntimeError("LongCLIP held-out validation received zero batches")
-    return float(np.mean(values))
+    return weighted_loss / sample_count
 
 
 @torch.no_grad()
@@ -167,6 +214,10 @@ def main():
     seed_everything(cfg.base_seed)
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
     wandb = initialize_wandb(cfg)
+    if cfg.validation_every_opt_steps:
+        reason = validation_skip_reason(cfg)
+        if reason is not None:
+            print(f"LongCLIP held-out validation disabled: {reason}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     state = TrainingState(
@@ -267,9 +318,7 @@ def main():
                 if (cfg.validation_every_opt_steps
                         and step % cfg.validation_every_opt_steps == 0):
                     val_loss = heldout_diffusion_loss(state, cfg, encoder, step)
-                    if val_loss is None:
-                        print("LongCLIP held-out validation skipped: no validation_data_sources")
-                    else:
+                    if val_loss is not None:
                         print(f"longclip_sara validation step {step}: loss={val_loss:.6f}")
                         if wandb is not None:
                             wandb.log({"longclip_sara_val/loss": val_loss}, step=step)

@@ -6,6 +6,22 @@
 
 ## Implementation update (2026-07-13)
 
+### LongCLIP direct branch (2026-07-15)
+
+LongCLIP-L is now a separate evidence path, not a Gemma-connector phase.
+`scripts/train_longclip_sara.py` freezes the official 248-token, 768-wide
+LongCLIP encoder and feeds its states directly to StyleJourney's unchanged
+cross-attention interface; only sparse SaRA-selected `attn2.to_k/to_v` U-Net
+entries train. This tests whether small U-Net adaptation improves an already
+CLIP-compatible long-text encoder without introducing a translation connector.
+
+The direct LongCLIP baseline must be compared against native StyleJourney CLIP
+before applying SaRA. The full SaRA run is gated by deterministic held-out
+masked diffusion loss (fixed rows, VAE modes, noise, and timestep grid), the
+four canonical visual prompts, strict LongCLIP/StyleJourney content hashes, and
+short-prompt regression checks. LongCLIP+Gemma is intentionally out of scope;
+ordinary prompt lengths do not justify stacking both long-context mechanisms.
+
 The current P1 path is **CLIP-preserving Gemma residual conditioning**. Native
 CLIP remains the SD1.5 context and `clip_gemma_residual_tsc` learns a
 timestep-aware correction to its fixed 77 slots from long Gemma input. Its
