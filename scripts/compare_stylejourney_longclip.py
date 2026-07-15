@@ -8,9 +8,16 @@ The script deliberately does not touch connector training or checkpoints.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import torch
+
+# Allow direct invocation from the repository root without PYTHONPATH=.
+if __package__ in {None, ""}:
+    _ROOT = Path(__file__).resolve().parents[1]
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
 
 from pure_ella.config import TrainConfig, seed_everything
 from pure_ella.diagnostics import generate_clip_teacher, save_validation_grid

@@ -76,6 +76,7 @@ class LongClipSaraConfig:
     sara_max_sparse_fraction_abort: float = 0.25
     sara_target_substrings: tuple[str, ...] = ("attn2.to_k", "attn2.to_v")
     validation_every_opt_steps: int = 250
+    validation_max_samples: int = 64
     generation_grid_every_opt_steps: int = 0
     base_seed: int = 1234
     val_steps: int = 30
@@ -107,6 +108,8 @@ class LongClipSaraConfig:
             raise ValueError("batch size and gradient accumulation must be positive")
         if self.epochs < 1 or self.max_samples < 1 or self.max_opt_steps < 1:
             raise ValueError("LongCLIP SaRA needs positive data and step budgets")
+        if self.validation_max_samples < 0:
+            raise ValueError("validation_max_samples must be non-negative")
         if self.mixed_precision not in {"no", "bf16"}:
             raise ValueError("mixed_precision must be 'no' or 'bf16'")
         if self.model_weight_dtype != "float32":
@@ -215,14 +218,19 @@ class LongClipEncoder:
 
 
 def longclip_sara_schema(cfg: LongClipSaraConfig, encoder: LongClipEncoder) -> dict:
+    sd_checkpoint = Path(cfg.sd_checkpoint).expanduser().resolve()
+    if not sd_checkpoint.is_file():
+        raise FileNotFoundError(f"StyleJourney checkpoint not found: {sd_checkpoint}")
     return {
-        "version": 1,
+        "version": 2,
         "conditioning_backend": "longclip_l_direct",
         "longclip": encoder.provenance(),
-        "sd_checkpoint": str(Path(cfg.sd_checkpoint).expanduser().resolve()),
+        "sd_checkpoint": str(sd_checkpoint),
+        "sd_checkpoint_sha256": sha256_file(sd_checkpoint),
         "sara_target_substrings": list(cfg.sara_target_substrings),
         "sara_selection_mode": cfg.sara_selection_mode,
         "sara_target_fraction": cfg.sara_target_fraction,
+        "sara_threshold": cfg.sara_threshold,
     }
 
 

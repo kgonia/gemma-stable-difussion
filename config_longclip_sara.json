@@ -30,6 +30,7 @@
   "caption_mix_medium": 0.25,
   "caption_mix_long": 0.50,
   "validation_every_opt_steps": 250,
+  "validation_max_samples": 64,
   "run_final_visual_check": true,
   "wandb_enabled": false
 }

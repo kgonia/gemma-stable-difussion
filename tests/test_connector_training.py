@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,28 +106,44 @@ class ConnectorTrainingTests(unittest.TestCase):
             )
 
     def test_longclip_sara_schema_pins_encoder_and_sparse_selection(self):
-        cfg = LongClipSaraConfig(
-            sd_checkpoint="stylejourney.safetensors",
-            longclip_repo="repo", longclip_checkpoint="model.pt",
-            output_dir="output", data_sources=["train.parquet"],
-            sara_target_fraction=0.05,
-        )
-        class FakeEncoder:
-            def provenance(self):
-                return {"checkpoint_sha256": "abc", "context_tokens": 248}
-        schema = longclip_sara_schema(cfg, FakeEncoder())
-        self.assertEqual(schema["conditioning_backend"], "longclip_l_direct")
-        self.assertEqual(schema["longclip"]["checkpoint_sha256"], "abc")
-        self.assertEqual(schema["sara_target_fraction"], 0.05)
-        checkpoint = {
-            "longclip_sara_schema": schema,
-            "completion": {"completed": True, "optimizer_steps": 1},
-            "sparse_values": {"unet.attn2.to_k.weight": {"values": torch.ones(1)}},
-        }
-        validate_longclip_sara_checkpoint(checkpoint, cfg, FakeEncoder(), "test")
-        checkpoint["completion"] = {"completed": True, "optimizer_steps": 0}
-        with self.assertRaisesRegex(RuntimeError, "zero updates"):
+        with tempfile.TemporaryDirectory() as directory:
+            sd_checkpoint = Path(directory) / "stylejourney.safetensors"
+            sd_checkpoint.write_bytes(b"stylejourney")
+            cfg = LongClipSaraConfig(
+                sd_checkpoint=str(sd_checkpoint), longclip_repo="repo",
+                longclip_checkpoint="model.pt", output_dir="output",
+                data_sources=["train.parquet"], sara_target_fraction=0.05,
+            )
+            class FakeEncoder:
+                def provenance(self):
+                    return {"checkpoint_sha256": "abc", "context_tokens": 248}
+            schema = longclip_sara_schema(cfg, FakeEncoder())
+            self.assertEqual(schema["conditioning_backend"], "longclip_l_direct")
+            self.assertEqual(schema["longclip"]["checkpoint_sha256"], "abc")
+            self.assertEqual(schema["sara_target_fraction"], 0.05)
+            self.assertEqual(schema["sara_threshold"], 1e-3)
+            self.assertIn("sd_checkpoint_sha256", schema)
+            checkpoint = {
+                "longclip_sara_schema": schema,
+                "completion": {"completed": True, "optimizer_steps": 1},
+                "sparse_values": {"unet.attn2.to_k.weight": {"values": torch.ones(1)}},
+            }
             validate_longclip_sara_checkpoint(checkpoint, cfg, FakeEncoder(), "test")
+            checkpoint["completion"] = {"completed": True, "optimizer_steps": 0}
+            with self.assertRaisesRegex(RuntimeError, "zero updates"):
+                validate_longclip_sara_checkpoint(checkpoint, cfg, FakeEncoder(), "test")
+
+    def test_longclip_scripts_support_direct_help_invocation(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            for script in (
+                    "scripts/train_longclip_sara.py",
+                    "scripts/compare_stylejourney_longclip.py"):
+                result = subprocess.run(
+                    [sys.executable, str(root / script), "--help"],
+                    cwd=directory, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage:", result.stdout.lower())
 
     def test_post_training_complex_cases_keep_canonical_settings(self):
         cases = TrainConfig().complex_generation_cases

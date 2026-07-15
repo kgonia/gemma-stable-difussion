@@ -9,12 +9,20 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 from tqdm import tqdm
+
+# ``python scripts/train_longclip_sara.py ...`` sets sys.path[0] to scripts/.
+# Make the repository package importable without requiring a PYTHONPATH tweak.
+if __package__ in {None, ""}:
+    _ROOT = Path(__file__).resolve().parents[1]
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
 
 from pure_ella.config import seed_everything
 from pure_ella.dataset import make_streaming_dataloader
@@ -78,6 +86,79 @@ def save_visual_check(state, cfg):
         "LongCLIP-L direct conditioning + sparse SaRA", cols=2)
 
 
+@torch.no_grad()
+def heldout_diffusion_loss(state, cfg, encoder, opt_step: int) -> float | None:
+    """Compute masked denoising MSE on the configured held-out parquet split."""
+    if not cfg.validation_data_sources or cfg.validation_max_samples == 0:
+        return None
+    was_training = state.unet.training
+    state.unet.eval()
+    values = []
+    try:
+        loader = make_streaming_dataloader(
+            cfg.validation_data_sources, phase=41, epoch=0,
+            max_samples=cfg.validation_max_samples,
+            batch_size=cfg.train_batch_size, shuffle=False, shuffle_buffer=1,
+            base_seed=cfg.base_seed + opt_step,
+            buckets=cfg.aspect_ratio_buckets,
+            drop_last=False, max_image_dimension=cfg.max_image_dimension)
+        for batch in loader:
+            captions = select_training_captions(batch, state)
+            image = batch["image"].to(device=state.device, dtype=state.unet_dtype)
+            image_mask = batch.get("image_mask")
+            if image_mask is not None:
+                image_mask = image_mask.to(device=state.device)
+            with model_autocast(state):
+                latent = state.vae.encode(image).latent_dist.sample()
+                latent = latent * state.vae.config.scaling_factor
+            noise = torch.randn_like(latent)
+            timestep = torch.randint(
+                0, state.scheduler.config.num_train_timesteps,
+                (len(captions),), device=state.device).long()
+            noisy = state.scheduler.add_noise(latent, noise, timestep)
+            context, _ = encoder.encode(captions)
+            with model_autocast(state):
+                prediction = camera_conditioned_unet(
+                    state.unet, noisy, timestep,
+                    encoder_hidden_states=context.to(dtype=state.unet_dtype),
+                ).sample
+                values.append(float(masked_mse(prediction, noise, image_mask).item()))
+    finally:
+        state.unet.train(was_training)
+    if not values:
+        raise RuntimeError("LongCLIP held-out validation received zero batches")
+    return float(np.mean(values))
+
+
+@torch.no_grad()
+def save_periodic_prompt_grid(state, cfg, opt_step: int):
+    """Render fixed validation prompts at configured training intervals."""
+    was_training = state.unet.training
+    state.unet.eval()
+    try:
+        images = [generate_clip_teacher(
+            prompt, state, steps=cfg.val_steps, guidance=cfg.val_guidance,
+            seed=cfg.val_seed) for prompt in cfg.val_prompts]
+    finally:
+        state.unet.train(was_training)
+    path = f"{cfg.output_dir}/longclip_sara_step_{opt_step:06d}.png"
+    save_validation_grid(images, ["LongCLIP+SaRA"] * len(images), path,
+                         f"LongCLIP+SaRA step {opt_step}")
+    print(f"LongCLIP SaRA validation grid saved: {path}")
+
+
+def initialize_wandb(cfg):
+    if not cfg.wandb_enabled:
+        return None
+    import wandb
+    wandb.init(
+        project=cfg.wandb_project,
+        entity=cfg.wandb_entity or None,
+        name=cfg.wandb_run_name or "longclip-l-stylejourney-sara",
+        config=cfg.to_dict())
+    return wandb
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", help="LongCLIP SaRA JSON config")
@@ -85,6 +166,7 @@ def main():
     cfg = LongClipSaraConfig.from_json(args.config)
     seed_everything(cfg.base_seed)
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
+    wandb = initialize_wandb(cfg)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     state = TrainingState(
@@ -176,6 +258,24 @@ def main():
                 if step % 25 == 0 or step == 1:
                     print(f"longclip_sara step {step}: loss={loss.item():.6f} "
                           f"lr={optimizer.param_groups[0]['lr']:.3g}")
+                if wandb is not None:
+                    wandb.log({
+                        "longclip_sara/step": step,
+                        "longclip_sara/loss": float(loss.item()),
+                        "longclip_sara/lr": optimizer.param_groups[0]["lr"],
+                    }, step=step)
+                if (cfg.validation_every_opt_steps
+                        and step % cfg.validation_every_opt_steps == 0):
+                    val_loss = heldout_diffusion_loss(state, cfg, encoder, step)
+                    if val_loss is None:
+                        print("LongCLIP held-out validation skipped: no validation_data_sources")
+                    else:
+                        print(f"longclip_sara validation step {step}: loss={val_loss:.6f}")
+                        if wandb is not None:
+                            wandb.log({"longclip_sara_val/loss": val_loss}, step=step)
+                if (cfg.generation_grid_every_opt_steps
+                        and step % cfg.generation_grid_every_opt_steps == 0):
+                    save_periodic_prompt_grid(state, cfg, step)
                 if step >= cfg.max_opt_steps:
                     break
             if step >= cfg.max_opt_steps:
@@ -202,6 +302,13 @@ def main():
           f"max LongCLIP tokens observed={encoder.max_observed_tokens}; "
           f"truncated training prompts={encoder.truncated_prompt_count}")
     save_visual_check(state, cfg)
+    if wandb is not None:
+        wandb.log({
+            "final/optimizer_steps": step,
+            "final/selected_delta_relative_l2": delta["selected_delta_relative_l2"],
+            "final/truncated_training_prompts": encoder.truncated_prompt_count,
+        })
+        wandb.finish()
 
 
 if __name__ == "__main__":

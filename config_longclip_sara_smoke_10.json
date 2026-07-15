@@ -6,6 +6,9 @@
   "data_sources": [
     "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/production/unsplash_lite_gemma_captions_13055.parquet"
   ],
+  "validation_data_sources": [
+    "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/validation.parquet"
+  ],
   "run_mode": "short_train",
   "context_tokens": 248,
   "fail_on_prompt_truncation": false,
@@ -15,6 +18,8 @@
   "max_samples": 10,
   "epochs": 1,
   "max_opt_steps": 5,
+  "validation_every_opt_steps": 5,
+  "validation_max_samples": 2,
   "sara_lr": 1e-05,
   "lr_warmup_steps": 0,
   "lr_decay_steps": 5,
