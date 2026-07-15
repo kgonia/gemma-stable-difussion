@@ -1,0 +1,35 @@
+{
+  "sd_checkpoint": "/mnt/e/stable-diffusion-webui/models/Stable-diffusion/stylejourney_v10.safetensors",
+  "longclip_repo": "/tmp/Long-CLIP",
+  "longclip_checkpoint": "/tmp/longclip-checkpoints/longclip-L.pt",
+  "output_dir": "./output_longclip_sara",
+  "data_sources": [
+    "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/train.parquet"
+  ],
+  "validation_data_sources": [
+    "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/validation.parquet"
+  ],
+  "run_mode": "full_train",
+  "context_tokens": 248,
+  "fail_on_prompt_truncation": false,
+  "mixed_precision": "bf16",
+  "train_batch_size": 4,
+  "gradient_accumulation_steps": 2,
+  "max_samples": 11708,
+  "epochs": 1,
+  "max_opt_steps": 1463,
+  "sara_lr": 1e-05,
+  "lr_warmup_steps": 100,
+  "lr_decay_steps": 1463,
+  "sara_selection_mode": "target_fraction",
+  "sara_target_fraction": 0.05,
+  "sara_min_sparse_fraction": 0.01,
+  "sara_max_sparse_fraction_warn": 0.10,
+  "sara_max_sparse_fraction_abort": 0.25,
+  "caption_mix_short": 0.25,
+  "caption_mix_medium": 0.25,
+  "caption_mix_long": 0.50,
+  "validation_every_opt_steps": 250,
+  "run_final_visual_check": true,
+  "wandb_enabled": false
+}

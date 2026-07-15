@@ -348,6 +348,28 @@ def clip_scaffold_scale(cfg: TrainConfig, step: int) -> float:
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
+def compatible_clip_checkpoint_key(raw_name: str, expected_keys) -> str:
+    """Map SD/Transformers 4 and 5 CLIP namespaces to the loaded model."""
+    candidates = [raw_name]
+    if raw_name.startswith("text_model."):
+        candidates.append(raw_name.removeprefix("text_model."))
+    else:
+        candidates.append(f"text_model.{raw_name}")
+    return next((name for name in candidates if name in expected_keys), raw_name)
+
+
+def filter_clip_checkpoint_incompatibilities(missing, unexpected):
+    """Drop generated CLIP position buffers and unused CLIP projection only."""
+    is_position_id = lambda name: name.endswith("embeddings.position_ids")
+    return (
+        [name for name in missing if not is_position_id(name)],
+        [
+            name for name in unexpected
+            if name != "text_projection.weight" and not is_position_id(name)
+        ],
+    )
+
+
 def load_gemma(state: TrainingState):
     """Load frozen Gemma 3 model and tokenizer."""
     cfg = state.cfg
@@ -386,21 +408,13 @@ def load_clip(state: TrainingState):
                     "conditioner.embedders.0.transformer.", "text_encoder.")
         expected = state.clip_model.state_dict()
 
-        def compatible_clip_key(raw_name: str) -> str:
-            """Map SD/Transformers 4 and 5 CLIP namespaces to this model."""
-            candidates = [raw_name]
-            if raw_name.startswith("text_model."):
-                candidates.append(raw_name.removeprefix("text_model."))
-            else:
-                candidates.append(f"text_model.{raw_name}")
-            return next((name for name in candidates if name in expected), raw_name)
-
         checkpoint_state = {}
         with safe_open(checkpoint, framework="pt", device="cpu") as handle:
             for key in handle.keys():
                 prefix = next((item for item in prefixes if key.startswith(item)), None)
                 if prefix is not None:
-                    name = compatible_clip_key(key[len(prefix):])
+                    name = compatible_clip_checkpoint_key(
+                        key[len(prefix):], expected)
                     checkpoint_state[name] = handle.get_tensor(key)
         if not checkpoint_state:
             raise RuntimeError(f"No CLIP text encoder found in {checkpoint}")
@@ -410,12 +424,8 @@ def load_clip(state: TrainingState):
             raise RuntimeError(f"Checkpoint CLIP tensor shape mismatch: {incompatible[:5]}")
         missing, unexpected = state.clip_model.load_state_dict(
             checkpoint_state, strict=False)
-        is_position_id = lambda name: name.endswith("embeddings.position_ids")
-        missing = [name for name in missing if not is_position_id(name)]
-        unexpected = [
-            name for name in unexpected
-            if name != "text_projection.weight" and not is_position_id(name)
-        ]
+        missing, unexpected = filter_clip_checkpoint_incompatibilities(
+            missing, unexpected)
         if missing or unexpected:
             raise RuntimeError(
                 f"Checkpoint CLIP load incomplete; missing={missing[:5]} unexpected={unexpected[:5]}")
@@ -593,7 +603,10 @@ def connector_checkpoint_schema(state: TrainingState) -> dict:
         "gemma_layer_mix_count": cfg.gemma_layer_mix_count,
         "clip_id": cfg.clip_id,
         "use_sd_checkpoint_text_encoder": cfg.use_sd_checkpoint_text_encoder,
-        "sd_checkpoint": os.path.abspath(os.path.expanduser(cfg.sd_checkpoint)),
+        "sd_checkpoint": (
+            "" if cfg.sd_checkpoint in {"", "runwayml/stable-diffusion-v1-5"} else
+            os.path.abspath(os.path.expanduser(cfg.sd_checkpoint))
+        ),
         "residual": is_residual_connector(cfg),
         "residual_strength": cfg.residual_strength,
     }
@@ -1789,7 +1802,7 @@ def run_ella_training(state: TrainingState):
         "config": cfg.to_dict(),
         "stage": "ella_frozen_unet",
         "completion": {
-            "completed": True,
+            "completed": ella_summary["steps"] > 0,
             "phase": "ella",
             "optimizer_steps": ella_summary["steps"],
             "best_loss": ella_summary["best_loss"],
@@ -2449,6 +2462,7 @@ def validate_residual_sara_resume(
         and cfg.run_sara_phase
         and "sara" in phases_requested
         and is_residual_connector(cfg)
+        and cfg.sara_epochs > 0
     )
     if not requires_handoff:
         return
@@ -2466,6 +2480,8 @@ def validate_residual_sara_resume(
         or not isinstance(completion, dict)
         or completion.get("completed") is not True
         or completion.get("phase") != "ella"
+        or not isinstance(completion.get("optimizer_steps"), int)
+        or completion["optimizer_steps"] <= 0
     ):
         raise ValueError(
             "stage3 residual SaRA requires the completed P1 "

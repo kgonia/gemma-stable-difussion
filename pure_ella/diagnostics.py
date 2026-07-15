@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from diffusers import DPMSolverMultistepScheduler, EulerAncestralDiscreteScheduler
 from PIL import Image
 from tqdm import tqdm
 
@@ -654,17 +655,47 @@ def _image_collapse_stats(uint8_images: torch.Tensor) -> dict:
 # ---------------------------------------------------------------------------
 # Complex / long-context prompt grids (from colab notebook)
 # ---------------------------------------------------------------------------
+def scheduler_for_generation_case(case: dict, training_scheduler):
+    """Build the explicitly requested scheduler for a visual verification case."""
+    sampler = case.get("sampler")
+    if sampler is None:
+        return None
+    if sampler == "dpmpp_sde_karras":
+        return DPMSolverMultistepScheduler.from_config(
+            training_scheduler.config,
+            algorithm_type="sde-dpmsolver++",
+            solver_order=2,
+            use_karras_sigmas=True,
+        )
+    if sampler == "euler_a":
+        return EulerAncestralDiscreteScheduler.from_config(
+            training_scheduler.config)
+    raise ValueError(
+        f"Unsupported complex-generation sampler {sampler!r}; "
+        "use 'dpmpp_sde_karras' or 'euler_a'.")
+
+
 @torch.no_grad()
 def generate_case_image(case: dict, state, context_tokens: int = None):
-    """Generate an image from a complex case dict using ELLA connector."""
-    return generate_ella(
-        case["prompt"],
-        state,
-        steps=case.get("steps", state.cfg.val_steps),
-        guidance=case.get("guidance", state.cfg.val_guidance),
-        seed=case.get("seed", state.cfg.val_seed),
-        context_tokens=context_tokens,
-    )
+    """Generate a verification case with all of its recorded settings."""
+    previous_scheduler = state.inf_scheduler
+    requested_scheduler = scheduler_for_generation_case(case, state.scheduler)
+    if requested_scheduler is not None:
+        state.inf_scheduler = requested_scheduler
+    try:
+        return generate_ella(
+            case["prompt"],
+            state,
+            steps=case.get("steps", state.cfg.val_steps),
+            guidance=case.get("guidance", state.cfg.val_guidance),
+            seed=case.get("seed", state.cfg.val_seed),
+            negative_prompt=case.get("negative_prompt", ""),
+            height=case.get("height", state.cfg.complex_prompt_height),
+            width=case.get("width", state.cfg.complex_prompt_width),
+            context_tokens=context_tokens,
+        )
+    finally:
+        state.inf_scheduler = previous_scheduler
 
 
 @torch.no_grad()
@@ -678,7 +709,14 @@ def save_complex_case_grid(
     for case in cases:
         print(f"Generating complex case: {case['name']}")
         imgs.append(generate_case_image(case, state, context_tokens=ctx))
-        labels.append(f"L{ctx}: {case['name']}")
+        sampler = case.get("sampler", "default")
+        labels.append(
+            f"L{ctx}: {case['name']} | {sampler} | "
+            f"{case.get('steps', state.cfg.val_steps)} steps | "
+            f"CFG {case.get('guidance', state.cfg.val_guidance):g} | "
+            f"seed {case.get('seed', state.cfg.val_seed)} | "
+            f"{case.get('width', state.cfg.complex_prompt_width)}x"
+            f"{case.get('height', state.cfg.complex_prompt_height)}")
     save_validation_grid(imgs, labels, path, title)
 
 

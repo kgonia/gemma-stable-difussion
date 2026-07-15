@@ -12,11 +12,13 @@ from transformers import BatchEncoding
 
 from train import (
     _validate_camera_checkpoint_schema,
+    compatible_clip_checkpoint_key,
     connector_checkpoint_schema,
     diffusion_training_step,
     DiffusionPhaseSpec,
     DiffusionStepOutput,
     estimate_steps,
+    filter_clip_checkpoint_incompatibilities,
     make_encode_gemma,
     residual_context_for_captions,
     resolve_autocast_dtype,
@@ -55,6 +57,7 @@ from pure_ella.prompts import (
 )
 from pure_ella.diagnostics import (
     ClipGeometryLoss,
+    generate_case_image,
     guided_prediction,
     suffix_counterfactual_sensitivity,
     validate_suffix_counterfactual_token_boundaries,
@@ -71,9 +74,108 @@ from pure_ella.sara import (
     remove_sara_gradient_masks,
     sara_selected_delta_metrics,
 )
+from pure_ella.longclip_sara import (
+    LONGCLIP_L_CONTEXT_TOKENS,
+    LONGCLIP_L_WIDTH,
+    LongClipSaraConfig,
+    longclip_sara_schema,
+    validate_longclip_sara_checkpoint,
+)
 
 
 class ConnectorTrainingTests(unittest.TestCase):
+    def test_longclip_sara_config_keeps_the_native_direct_contract(self):
+        cfg = LongClipSaraConfig(
+            sd_checkpoint="stylejourney.safetensors",
+            longclip_repo="/tmp/Long-CLIP",
+            longclip_checkpoint="/tmp/longclip-L.pt",
+            output_dir="output", data_sources=["train.parquet"],
+        )
+        self.assertEqual(cfg.context_tokens, LONGCLIP_L_CONTEXT_TOKENS)
+        self.assertEqual(cfg.longclip_width, LONGCLIP_L_WIDTH)
+        self.assertEqual(cfg.gradient_accumulation_steps, 2)
+        self.assertEqual(len(cfg.complex_generation_cases), 4)
+        with self.assertRaisesRegex(ValueError, "context_tokens=248"):
+            LongClipSaraConfig(
+                sd_checkpoint="stylejourney.safetensors",
+                longclip_repo="repo", longclip_checkpoint="model.pt",
+                output_dir="output", data_sources=["train.parquet"],
+                context_tokens=77,
+            )
+
+    def test_longclip_sara_schema_pins_encoder_and_sparse_selection(self):
+        cfg = LongClipSaraConfig(
+            sd_checkpoint="stylejourney.safetensors",
+            longclip_repo="repo", longclip_checkpoint="model.pt",
+            output_dir="output", data_sources=["train.parquet"],
+            sara_target_fraction=0.05,
+        )
+        class FakeEncoder:
+            def provenance(self):
+                return {"checkpoint_sha256": "abc", "context_tokens": 248}
+        schema = longclip_sara_schema(cfg, FakeEncoder())
+        self.assertEqual(schema["conditioning_backend"], "longclip_l_direct")
+        self.assertEqual(schema["longclip"]["checkpoint_sha256"], "abc")
+        self.assertEqual(schema["sara_target_fraction"], 0.05)
+        checkpoint = {
+            "longclip_sara_schema": schema,
+            "completion": {"completed": True, "optimizer_steps": 1},
+            "sparse_values": {"unet.attn2.to_k.weight": {"values": torch.ones(1)}},
+        }
+        validate_longclip_sara_checkpoint(checkpoint, cfg, FakeEncoder(), "test")
+        checkpoint["completion"] = {"completed": True, "optimizer_steps": 0}
+        with self.assertRaisesRegex(RuntimeError, "zero updates"):
+            validate_longclip_sara_checkpoint(checkpoint, cfg, FakeEncoder(), "test")
+
+    def test_post_training_complex_cases_keep_canonical_settings(self):
+        cases = TrainConfig().complex_generation_cases
+        self.assertEqual([case["name"] for case in cases], [
+            "warrior_princess",
+            "medieval_darth_vader_dragon",
+            "goddess_of_death",
+            "milkyway",
+        ])
+        self.assertEqual(cases[0]["sampler"], "dpmpp_sde_karras")
+        self.assertEqual(cases[1]["sampler"], "euler_a")
+        self.assertEqual(cases[0]["negative_prompt"].startswith("(bonnet)"), True)
+        self.assertTrue(all(case["width"] == 768 for case in cases))
+        self.assertTrue(all(case["height"] == 960 for case in cases))
+
+    def test_complex_case_generation_applies_and_restores_all_case_settings(self):
+        from diffusers import DDPMScheduler, EulerAncestralDiscreteScheduler
+
+        old_scheduler = object()
+        state = SimpleNamespace(
+            cfg=SimpleNamespace(
+                val_steps=11, val_guidance=2.5, val_seed=22,
+                complex_prompt_width=512, complex_prompt_height=512),
+            scheduler=DDPMScheduler(num_train_timesteps=20),
+            inf_scheduler=old_scheduler,
+        )
+        case = {
+            "prompt": "test prompt", "negative_prompt": "no test",
+            "sampler": "euler_a", "steps": 20, "guidance": 7.0,
+            "seed": 99, "width": 768, "height": 960,
+        }
+        installed_schedulers = []
+        def fake_generate(*args, **kwargs):
+            installed_schedulers.append(state.inf_scheduler)
+            return "image"
+
+        with patch("pure_ella.diagnostics.generate_ella", side_effect=fake_generate) as generate:
+            result = generate_case_image(case, state, context_tokens=77)
+
+        self.assertEqual(result, "image")
+        self.assertIs(state.inf_scheduler, old_scheduler)
+        self.assertEqual(generate.call_args.args, ("test prompt", state))
+        self.assertEqual(generate.call_args.kwargs, {
+            "steps": 20, "guidance": 7.0, "seed": 99,
+            "negative_prompt": "no test", "height": 960, "width": 768,
+            "context_tokens": 77,
+        })
+        # The requested scheduler was installed while generate_ella ran.
+        self.assertIsInstance(installed_schedulers[0], EulerAncestralDiscreteScheduler)
+
     def test_clip_geometry_can_supervise_all_tokens_and_pool_real_tokens(self):
         target = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]])
         prediction = target.clone()
@@ -733,6 +835,33 @@ class ConnectorTrainingTests(unittest.TestCase):
         validate_connector_checkpoint_schema(
             {"connector_schema": legacy_schema}, state, "pure-v1.pt")
 
+    def test_default_sd_checkpoint_schema_is_cwd_independent(self):
+        cfg = TrainConfig(connector_type="ella_tsc")
+        schema = connector_checkpoint_schema(
+            SimpleNamespace(cfg=cfg, gemma_hidden_size=1152))
+        self.assertEqual(schema["sd_checkpoint"], "")
+
+    def test_clip_checkpoint_namespace_and_buffer_filters(self):
+        transformers4_keys = {"text_model.embeddings.position_embedding.weight"}
+        transformers5_keys = {"embeddings.position_embedding.weight"}
+        self.assertEqual(
+            compatible_clip_checkpoint_key(
+                "embeddings.position_embedding.weight", transformers4_keys),
+            "text_model.embeddings.position_embedding.weight",
+        )
+        self.assertEqual(
+            compatible_clip_checkpoint_key(
+                "text_model.embeddings.position_embedding.weight",
+                transformers5_keys),
+            "embeddings.position_embedding.weight",
+        )
+        missing, unexpected = filter_clip_checkpoint_incompatibilities(
+            ["text_model.embeddings.position_ids", "encoder.weight"],
+            ["embeddings.position_ids", "text_projection.weight", "bad.weight"],
+        )
+        self.assertEqual(missing, ["encoder.weight"])
+        self.assertEqual(unexpected, ["bad.weight"])
+
     def test_residual_sara_requires_p1_resume(self):
         cfg = TrainConfig(
             experiment_stage="stage3_long_context_with_sara",
@@ -746,18 +875,44 @@ class ConnectorTrainingTests(unittest.TestCase):
             checkpoint_path = Path(directory) / "p1.pt"
             torch.save({
                 "stage": "ella_frozen_unet",
-                "completion": {"completed": True, "phase": "ella"},
+                "completion": {
+                    "completed": True, "phase": "ella",
+                    "optimizer_steps": 1,
+                },
             }, checkpoint_path)
             validate_residual_sara_resume(
                 cfg, {"sara"}, str(checkpoint_path))
 
             torch.save({
                 "stage": "clip_gemma_residual_frozen_unet",
-                "completion": {"completed": True, "phase": "ella"},
+                "completion": {
+                    "completed": True, "phase": "ella",
+                    "optimizer_steps": 1,
+                },
             }, checkpoint_path)
             with self.assertRaisesRegex(ValueError, "intermediate"):
                 validate_residual_sara_resume(
                     cfg, {"sara"}, str(checkpoint_path))
+
+            torch.save({
+                "stage": "ella_frozen_unet",
+                "completion": {
+                    "completed": True, "phase": "ella",
+                    "optimizer_steps": 0,
+                },
+            }, checkpoint_path)
+            with self.assertRaisesRegex(ValueError, "intermediate"):
+                validate_residual_sara_resume(
+                    cfg, {"sara"}, str(checkpoint_path))
+
+        disabled_cfg = TrainConfig(
+            experiment_stage="stage3_long_context_with_sara",
+            connector_type="clip_gemma_residual_tsc",
+            run_clip_alignment_pretrain=False,
+            conditioning_dropout_prob=0.0,
+            sara_epochs=0,
+        )
+        validate_residual_sara_resume(disabled_cfg, {"sara"}, "")
 
     def test_paired_evaluator_uses_exact_sign_test_and_content_mask(self):
         p_value, wins, losses, non_ties = exact_sign_test_two_sided(

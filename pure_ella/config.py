@@ -213,7 +213,7 @@ class TrainConfig:
         "a watercolor painting of a mountain lake",
         "a neon-lit cyberpunk alleyway at night",
     ])
-    # --- Complex / long-context prompt grids (from colab notebook) ---
+    # --- Post-training visual verification / long-context prompt grids ---
     complex_prompt_steps: int = 30
     complex_prompt_guidance: float = 5.5
     complex_prompt_seed: int = 777
@@ -221,14 +221,69 @@ class TrainConfig:
     complex_prompt_height: int = 512
     complex_generation_cases: List[dict] = field(default_factory=lambda: [
         {
-            "name": "retrofuturist_magazine_cars",
-            "prompt": "A highly detailed retrofuturist magazine infographic about future cars, laid out like a beautifully preserved issue of Popular Mechanics, with elegant diagram panels, mechanical callouts, polished concept-art rendering, vivid color, and the feeling of an award-winning poster-sized editorial spread.",
-            "steps": 30, "guidance": 7.0, "seed": 3197632166, "width": 512, "height": 512,
+            "name": "warrior_princess",
+            "prompt": (
+                "poster of warrior princess| standing on hill | centered| key "
+                "visual| intricate| highly detailed| breathtaking| precise "
+                "lineart| vibrant| panoramic| cinematic| Carne Griffiths| "
+                "Conrad Roset"
+            ),
+            "negative_prompt": (
+                "(bonnet), (hat), (beanie), cap, (((wide shot))), (cropped "
+                "head), bad framing, out of frame, deformed, cripple, old, fat, "
+                "ugly, poor, missing arm, additional arms, additional legs, "
+                "additional head, additional face, multiple people, group of "
+                "people, dyed hair, black and white, grayscale"
+            ),
+            "sampler": "dpmpp_sde_karras",
+            "steps": 30, "guidance": 7.0, "seed": 4267154965,
+            "width": 768, "height": 960,
         },
         {
-            "name": "warrior_princess_poster",
-            "prompt": "A dramatic poster of a warrior princess standing centered on a hill as the main cinematic key visual, with intricate linework, vibrant colors, panoramic scale, breathtaking fantasy atmosphere, and the finish of a carefully painted illustrated poster.",
-            "steps": 30, "guidance": 7.0, "seed": 4267154965, "width": 512, "height": 512,
+            "name": "medieval_darth_vader_dragon",
+            "prompt": (
+                "photo of medieval darth vader on red dragon, epic fight scene, "
+                "holding glowing red flaming sword, full body, hyper realistic, "
+                "intricate, apocalyptic"
+            ),
+            "negative_prompt": "dark",
+            "sampler": "euler_a",
+            "steps": 20, "guidance": 7.0, "seed": 744448957,
+            "width": 768, "height": 960,
+        },
+        {
+            "name": "goddess_of_death",
+            "prompt": (
+                "Goddess, Goddess of Death, detailing, facial detailing, ultra "
+                "quality, cinematic lighting, perfect and beautiful face, "
+                "perfect composition, realistic, circuit board, fantasy, "
+                "illustration, artstation, trial dark fantasy, photorealistic "
+                "concept art, intense shadows, intense lighting :: 8k resolution, "
+                "ultra-detailed quality 3D octane render, sharp focus, wallpaper, "
+                "HDR, high quality, high-definition stylize 500"
+            ),
+            "negative_prompt": (
+                "(deformed mouth), (deformed lips), (deformed eyes), "
+                "(cross-eyed), (deformed iris), (deformed hands), lowers, 3d "
+                "render, cartoon, long body, wide hips, narrow waist, disfigured, "
+                "ugly, cross eyed, squinting, grain, Deformed, blurry, bad "
+                "anatomy, poorly drawn face, mutation, mutated, extra limb, ugly, "
+                "(poorly drawn hands), missing limb, floating limbs, disconnected "
+                "limbs, malformed hands, blur, out of focus, long neck, "
+                "disgusting, poorly drawn, mutilated, mangled, old, surreal, "
+                "((text)), jewelery, earrings"
+            ),
+            "sampler": "dpmpp_sde_karras",
+            "steps": 30, "guidance": 7.0, "seed": 1826311933,
+            "width": 768, "height": 960,
+        },
+        {
+            "name": "milkyway",
+            "prompt": "milkyway",
+            "negative_prompt": "dark",
+            "sampler": "dpmpp_sde_karras",
+            "steps": 30, "guidance": 7.0, "seed": 1826311933,
+            "width": 768, "height": 960,
         },
     ])
     long_eval_prompts: List[str] = field(default_factory=lambda: [
