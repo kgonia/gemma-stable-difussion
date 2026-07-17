@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import math
 import json
 import sys
 from dataclasses import asdict, dataclass, field
@@ -390,6 +391,46 @@ def validate_longclip_sara_checkpoint(
         if not isinstance(gate, dict) or gate.get("passed") is not True:
             raise RuntimeError(
                 f"LongCLIP SaRA checkpoint {source} did not pass validation gates")
+        if validation_gate_required and not _checkpoint_heldout_gate_passed(gate):
+            raise RuntimeError(
+                f"LongCLIP SaRA checkpoint {source} did not run/pass held-out validation")
+        if short_prompt_gate_required and not _checkpoint_short_prompt_gate_passed(gate):
+            raise RuntimeError(
+                f"LongCLIP SaRA checkpoint {source} did not run/pass short-prompt validation")
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _checkpoint_heldout_gate_passed(gate: dict) -> bool:
+    """Return True when held-out validation independently ran and passed.
+
+    New checkpoints record explicit ``heldout_ran``/``heldout_passed`` fields.
+    Legacy checkpoints are accepted only if the old aggregate ``passed`` flag is
+    backed by finite held-out metrics, which keeps existing real endpoints
+    reloadable while rejecting synthetic ``passed=True`` shells.
+    """
+    if "heldout_ran" in gate or "heldout_passed" in gate:
+        return (gate.get("heldout_ran") is True
+                and gate.get("heldout_passed") is True
+                and _finite_number(gate.get("baseline_loss"))
+                and _finite_number(gate.get("final_loss"))
+                and _finite_number(gate.get("relative_change")))
+    return (gate.get("passed") is True
+            and _finite_number(gate.get("baseline_loss"))
+            and _finite_number(gate.get("final_loss"))
+            and _finite_number(gate.get("relative_change")))
+
+
+def _checkpoint_short_prompt_gate_passed(gate: dict) -> bool:
+    """Return True when short-prompt regression validation ran and passed."""
+    if "short_prompt_ran" in gate or "short_prompt_passed" in gate:
+        return (gate.get("short_prompt_ran") is True
+                and gate.get("short_prompt_passed") is True
+                and _finite_number(gate.get("short_prompt_relative_rms")))
+    return (gate.get("passed") is True
+            and _finite_number(gate.get("short_prompt_relative_rms")))
 
 
 def install_longclip_sara_sidecars(unet, cfg: LongClipSaraConfig) -> dict[str, dict | None]:

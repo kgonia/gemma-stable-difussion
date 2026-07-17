@@ -423,7 +423,17 @@ class ConnectorTrainingTests(unittest.TestCase):
                     for key, value in source.class_embedding.state_dict().items()
                 },
                 "p4_state_dict": p4_state_dict(source),
-                "validation_gate": {"passed": True},
+                "validation_gate": {
+                    "baseline_loss": 1.0,
+                    "final_loss": 0.99,
+                    "relative_change": -0.01,
+                    "heldout_ran": True,
+                    "heldout_passed": True,
+                    "short_prompt_relative_rms": None,
+                    "short_prompt_ran": False,
+                    "short_prompt_passed": False,
+                    "passed": True,
+                },
                 "completion": {"completed": True, "optimizer_steps": 1},
                 "run_config": cfg.to_dict(),
             }
@@ -473,6 +483,35 @@ class ConnectorTrainingTests(unittest.TestCase):
                     FakeUNet(), gate_disabled_checkpoint, gate_disabled_cfg,
                     encoder, "gate-forced", require_validation_gate=True)
 
+            synthetic_shell = dict(gate_disabled_checkpoint)
+            synthetic_shell["validation_gate"] = {"passed": True}
+            with self.assertRaisesRegex(RuntimeError, "held-out validation"):
+                load_longclip_sara_checkpoint(
+                    FakeUNet(), synthetic_shell, gate_disabled_cfg,
+                    encoder, "synthetic-heldout",
+                    require_validation_gate=True,
+                    require_short_prompt_regression_gate=False)
+            with self.assertRaisesRegex(RuntimeError, "short-prompt validation"):
+                load_longclip_sara_checkpoint(
+                    FakeUNet(), synthetic_shell, gate_disabled_cfg,
+                    encoder, "synthetic-short",
+                    require_validation_gate=False,
+                    require_short_prompt_regression_gate=True)
+
+            legacy_real_gate = dict(gate_disabled_checkpoint)
+            legacy_real_gate["validation_gate"] = {
+                "baseline_loss": 1.0,
+                "final_loss": 0.99,
+                "relative_change": -0.01,
+                "short_prompt_relative_rms": 0.01,
+                "passed": True,
+            }
+            load_longclip_sara_checkpoint(
+                FakeUNet(), legacy_real_gate, gate_disabled_cfg,
+                encoder, "legacy-real",
+                require_validation_gate=True,
+                require_short_prompt_regression_gate=True)
+
     def test_bucket_keys_for_batch_requires_single_bucket_pair(self):
         self.assertEqual(
             bucket_keys_for_batch({"bucket": (640, 1024)}, 2),
@@ -509,7 +548,12 @@ class ConnectorTrainingTests(unittest.TestCase):
                 "longclip_sara_schema": schema,
                 "completion": {"completed": True, "optimizer_steps": 1},
                 "sparse_values": {"unet.attn2.to_k.weight": {"values": torch.ones(1)}},
-                "validation_gate": {"passed": True},
+                "validation_gate": {
+                    "short_prompt_relative_rms": 0.01,
+                    "short_prompt_ran": True,
+                    "short_prompt_passed": True,
+                    "passed": True,
+                },
             }
             validate_longclip_sara_checkpoint(checkpoint, cfg, FakeEncoder(), "test")
             checkpoint["completion"] = {"completed": True, "optimizer_steps": 0}

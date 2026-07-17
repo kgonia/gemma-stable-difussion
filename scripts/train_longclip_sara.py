@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -279,6 +280,13 @@ def validation_skip_reason(cfg) -> str | None:
     return None
 
 
+def finite_float(value: float | None) -> float | None:
+    if value is None:
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
+
+
 def deterministic_validation_captions(batch: dict) -> list[str]:
     """Use the same long caption on every validation pass."""
     return _as_prompt_list(batch["caption"])
@@ -493,13 +501,12 @@ def main():
     seed_everything(cfg.base_seed)
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
     wandb = initialize_wandb(cfg)
-    if cfg.validation_every_opt_steps:
-        reason = validation_skip_reason(cfg)
-        if reason is not None:
-            print(f"LongCLIP held-out validation disabled: {reason}")
-            if cfg.require_validation_gate:
-                raise ValueError(
-                    f"LongCLIP validation gate is required but disabled: {reason}")
+    reason = validation_skip_reason(cfg)
+    if reason is not None:
+        print(f"LongCLIP held-out validation disabled: {reason}")
+        if cfg.require_validation_gate:
+            raise ValueError(
+                f"LongCLIP validation gate is required but disabled: {reason}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     state = TrainingState(
@@ -715,6 +722,25 @@ def main():
                 f"{cfg.short_prompt_max_relative_rms:.6f}")
 
     delta = sara_selected_delta_metrics(state.unet, baseline)
+    baseline_validation_value = finite_float(baseline_validation_loss)
+    final_validation_value = finite_float(final_validation_loss)
+    validation_relative_value = finite_float(validation_relative_change)
+    short_prompt_relative_value = finite_float(short_prompt_relative_rms)
+    heldout_ran = (
+        baseline_validation_value is not None
+        and final_validation_value is not None
+        and validation_relative_value is not None)
+    if heldout_ran:
+        assert baseline_validation_value is not None
+        assert final_validation_value is not None
+        heldout_passed = (
+            final_validation_value <= baseline_validation_value * (
+                1.0 + cfg.validation_max_relative_regression))
+    else:
+        heldout_passed = False
+    short_prompt_ran = short_prompt_relative_value is not None
+    short_prompt_passed = short_prompt_ran and (
+        short_prompt_relative_value <= cfg.short_prompt_max_relative_rms)
     validation_summary = {
         "baseline_loss": baseline_validation_loss,
         "final_loss": final_validation_loss,
@@ -722,9 +748,16 @@ def main():
         "final_bucket_summary": final_bucket_summary,
         "relative_change": validation_relative_change,
         "max_relative_regression": cfg.validation_max_relative_regression,
+        "heldout_ran": heldout_ran,
+        "heldout_passed": heldout_passed,
         "short_prompt_relative_rms": short_prompt_relative_rms,
         "short_prompt_max_relative_rms": cfg.short_prompt_max_relative_rms,
-        "passed": True,
+        "short_prompt_ran": short_prompt_ran,
+        "short_prompt_passed": short_prompt_passed,
+        "passed": (
+            (heldout_passed or not cfg.require_validation_gate)
+            and (short_prompt_passed or not cfg.require_short_prompt_regression_gate)
+        ),
     }
     artifact = {
         "longclip_sara_schema": longclip_sara_schema(cfg, encoder),
