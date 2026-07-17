@@ -1,0 +1,27 @@
+[
+  {
+    "id": "t_b0b90333",
+    "title": "GPU: OmniPaint DeepFurniture raw-generated-before dataset",
+    "body": "GPU UUID: GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd\nCUDA device: cuda:0\nLock: /tmp/hermes-gpu-0.lock\nWorking directory: /home/krz/PycharmProjects/OmniPaint\nCommand: /home/krz/PycharmProjects/OmniPaint/scripts/run_deepfurniture_dataset_gpu_queue.sh\nOutputs: /mnt/e/data/edit_datasets and /mnt/e/data/edit_datasets/_work/episodes/*/{generated.png,before.jpg,after.jpg,complete.json}\nLog: /mnt/e/data/edit_datasets/_work/raw_generated_before_full_run.log\nModel: /mnt/d/hf-cache/exports/FLUX.1-dev-convrot8\nCompositing policy: raw_generated_before_v1 — image_before is raw full OmniPaint removal generation, not paste-back.\nAcceptance:\n1. Run the exact command above from the working directory.\n2. The command itself acquires /tmp/hermes-gpu-0.lock and refuses unknown compute processes.\n3. Do not launch outside the lock.\n4. Do not complete this card before the command exits and these checks pass:\n   - /mnt/e/data/edit_datasets/generation_report.json exists.\n   - generation_report.json total equals completed counts sum.\n   - /mnt/e/data/edit_datasets/_work/raw_generated_before_full_run.log records ALL DATASETS COMPLETE AND VALIDATED.\n   - Spot-check at least three completed episode directories contain generated.png, before.jpg, after.jpg, mask_removal.png, complete.json with compositing_version raw_generated_before_v1.\nFailure handling:\n- Exit 75 means lock unavailable; comment/block, do not bypass.\n- Exit 76 means unexpected GPU compute process; comment/block, do not kill it.\n- Preserve the log and first failure traceback before retrying.\n",
+    "assignee": "coder",
+    "status": "running",
+    "priority": 0,
+    "tenant": null,
+    "workspace_kind": "dir",
+    "workspace_path": "/home/krz/PycharmProjects/OmniPaint",
+    "branch_name": null,
+    "project_id": null,
+    "created_by": "gpu-queue",
+    "created_at": 1784282539,
+    "started_at": 1784282545,
+    "completed_at": null,
+    "result": null,
+    "skills": [
+      "gpu-kanban-queue"
+    ],
+    "max_retries": 1,
+    "session_id": null,
+    "workflow_template_id": null,
+    "current_step_key": null
+  }
+]
