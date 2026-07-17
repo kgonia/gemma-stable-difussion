@@ -121,6 +121,18 @@ class LongClipSaraConfig:
     wandb_entity: str = ""
     wandb_run_name: str = ""
     initial_sara_patch: str = ""
+    resolution_conditioning_enabled: bool = False
+    resolution_conditioning_hidden_dim: int = 256
+    resolution_conditioning_dropout_prob: float = 0.0
+    p4_enabled: bool = False
+    p4_variant: Literal["no_pe", "rope"] = "no_pe"
+    p4_insertions: list[str] = field(default_factory=lambda: ["pre_mid"])
+    p4_hidden_dim: int = 0  # 0 = deepest U-Net channel count
+    p4_heads: int = 8
+    p4_ff_mult: float = 2.0
+    p4_rope_base: float = 10000.0
+    p4_timestep_adaln: bool = True
+    p4_smoke_identity_check: bool = True
 
     def __post_init__(self):
         if self.context_tokens != LONGCLIP_L_CONTEXT_TOKENS:
@@ -162,6 +174,33 @@ class LongClipSaraConfig:
             raise ValueError("SaRA fraction gates are inconsistent")
         if self.lr_decay_steps and self.lr_decay_steps < self.lr_warmup_steps:
             raise ValueError("lr_decay_steps must be >= lr_warmup_steps")
+        if self.resolution_conditioning_hidden_dim < 1:
+            raise ValueError("resolution_conditioning_hidden_dim must be positive")
+        if not 0 <= self.resolution_conditioning_dropout_prob <= 1:
+            raise ValueError("resolution_conditioning_dropout_prob must be in [0, 1]")
+        if self.p4_variant not in {"no_pe", "rope"}:
+            raise ValueError("p4_variant must be 'no_pe' or 'rope'")
+        if self.p4_enabled:
+            if not self.p4_insertions:
+                raise ValueError("p4_enabled requires at least one insertion site")
+            allowed_sites = {"pre_mid", "post_mid"}
+            unknown_sites = sorted(set(self.p4_insertions) - allowed_sites)
+            if unknown_sites:
+                raise ValueError(f"unsupported P4 insertion sites: {unknown_sites}")
+            if self.p4_heads < 1:
+                raise ValueError("p4_heads must be positive")
+            if self.p4_hidden_dim < 0:
+                raise ValueError("p4_hidden_dim must be non-negative")
+            if self.p4_hidden_dim and self.p4_hidden_dim % self.p4_heads:
+                raise ValueError("p4_hidden_dim must be divisible by p4_heads")
+            if self.p4_variant == "rope":
+                deepest_dim = self.p4_hidden_dim or 1280
+                if (deepest_dim // self.p4_heads) % 4:
+                    raise ValueError("P4 RoPE requires per-head dim divisible by 4")
+            if self.p4_ff_mult <= 0:
+                raise ValueError("p4_ff_mult must be positive")
+            if self.p4_rope_base <= 0:
+                raise ValueError("p4_rope_base must be positive")
 
     @classmethod
     def from_json(cls, path: str | Path) -> "LongClipSaraConfig":
@@ -267,7 +306,7 @@ def longclip_sara_schema(cfg: LongClipSaraConfig, encoder: LongClipEncoder) -> d
     sd_checkpoint = Path(cfg.sd_checkpoint).expanduser().resolve()
     if not sd_checkpoint.is_file():
         raise FileNotFoundError(f"StyleJourney checkpoint not found: {sd_checkpoint}")
-    return {
+    schema = {
         "version": 2,
         "conditioning_backend": "longclip_l_direct",
         "longclip": encoder.provenance(),
@@ -278,6 +317,22 @@ def longclip_sara_schema(cfg: LongClipSaraConfig, encoder: LongClipEncoder) -> d
         "sara_target_fraction": cfg.sara_target_fraction,
         "sara_threshold": cfg.sara_threshold,
     }
+    if cfg.resolution_conditioning_enabled:
+        from pure_ella.resolution import resolution_condition_schema
+        schema["resolution_conditioning"] = resolution_condition_schema(
+            hidden_dim=cfg.resolution_conditioning_hidden_dim)
+    if cfg.p4_enabled:
+        from pure_ella.p4 import p4_schema
+        schema["p4"] = p4_schema(
+            enabled=True,
+            variant=cfg.p4_variant,
+            sites=cfg.p4_insertions,
+            hidden_dim=(cfg.p4_hidden_dim or 1280),
+            heads=cfg.p4_heads,
+            ff_mult=cfg.p4_ff_mult,
+            rope_base=cfg.p4_rope_base,
+            timestep_adaln=cfg.p4_timestep_adaln)
+    return schema
 
 
 def validate_longclip_sara_checkpoint(

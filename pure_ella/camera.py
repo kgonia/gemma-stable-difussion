@@ -9,6 +9,11 @@ from typing import Any, Mapping
 import torch
 import torch.nn as nn
 
+from pure_ella.resolution import (
+    ResolutionConditioner,
+    make_resolution_condition_from_latents,
+)
+
 
 CAMERA_VALUE_COUNT = 4
 CAMERA_CONDITION_DIM = 9
@@ -335,9 +340,17 @@ def install_camera_conditioner(unet, conditioner: CameraConditioner) -> None:
 def camera_conditioned_unet(
     unet, sample: torch.Tensor, timestep: torch.Tensor,
     *, encoder_hidden_states: torch.Tensor,
-    camera_condition: torch.Tensor | None = None, **kwargs,
+    camera_condition: torch.Tensor | None = None,
+    resolution_condition: torch.Tensor | None = None,
+    **kwargs,
 ):
-    """Call a UNet with camera labels when the P3 branch is installed."""
+    """Call a UNet with installed sidecar labels when needed.
+
+    Historically this only handled the P3 camera conditioner.  The LongCLIP
+    SaRA branch also uses the SD class-embedding/timestep path for the separate
+    resolution conditioner; when installed and no explicit condition is passed,
+    the emitted canvas is inferred from the latent spatial shape.
+    """
     conditioner = getattr(unet, "class_embedding", None)
     if isinstance(conditioner, CameraConditioner):
         if camera_condition is None:
@@ -346,5 +359,13 @@ def camera_conditioned_unet(
             camera_condition = camera_condition.to(
                 device=sample.device, dtype=torch.float32)
         kwargs["class_labels"] = camera_condition
+    else:
+        if isinstance(conditioner, ResolutionConditioner):
+            if resolution_condition is None:
+                resolution_condition = make_resolution_condition_from_latents(sample)
+            else:
+                resolution_condition = resolution_condition.to(
+                    device=sample.device, dtype=torch.float32)
+            kwargs["class_labels"] = resolution_condition
     return unet(
         sample, timestep, encoder_hidden_states=encoder_hidden_states, **kwargs)

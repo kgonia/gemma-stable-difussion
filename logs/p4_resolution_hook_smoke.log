@@ -1,0 +1,5 @@
+<stdin>:42: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+identity_max_abs 0.0
+{'p4/pre_mid_gate': 0.0, 'p4/pre_mid_tanh_gate': 0.0, 'p4/pre_mid_branch_rms': 0.21178437769412994, 'p4/pre_mid_output_delta_rms': 0.0, 'p4/pre_mid_gate_grad': -3.2127974033355713}
+p4_resolution_hook_smoke=PASS

@@ -31,6 +31,13 @@ from pure_ella.diagnostics import (
 from pure_ella.longclip_sara import (
     LongClipEncoder, LongClipSaraConfig, longclip_sara_schema,
 )
+from pure_ella.p4 import install_p4_blocks, p4_schema, p4_state_dict, p4_telemetry
+from pure_ella.resolution import (
+    ResolutionConditioner,
+    install_resolution_conditioner,
+    make_resolution_condition_from_bucket,
+    resolution_condition_schema,
+)
 from pure_ella.sara import (
     build_sara_attn2_kv_sparse_masks, capture_sara_selected_values,
     collect_sara_sparse_values, install_sara_gradient_masks,
@@ -53,6 +60,88 @@ def lr_scheduler(optimizer, cfg):
         return max(0.0, 1.0 - (step - cfg.lr_warmup_steps) / max(
             1, cfg.lr_decay_steps - cfg.lr_warmup_steps))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
+
+
+def resolution_condition_for_batch(
+    batch: dict, latent: torch.Tensor, cfg, *, training: bool = True,
+) -> torch.Tensor | None:
+    if not cfg.resolution_conditioning_enabled:
+        return None
+    condition = make_resolution_condition_from_bucket(
+        batch["bucket"], batch_size=latent.shape[0], device=latent.device)
+    dropout = float(cfg.resolution_conditioning_dropout_prob) if training else 0.0
+    if dropout > 0:
+        mask = torch.rand(latent.shape[0], device=latent.device) < dropout
+        if mask.any():
+            condition = condition.clone()
+            condition[mask] = 0
+    return condition
+
+
+def install_longclip_sidecars(state, cfg) -> dict:
+    """Install optional resolution/P4 sidecars after SaRA freezes base params."""
+    summary: dict[str, dict | None] = {"resolution_conditioning": None, "p4": None}
+    if cfg.resolution_conditioning_enabled:
+        conditioner = ResolutionConditioner(
+            output_dim=state.unet.time_embedding.linear_2.out_features,
+            hidden_dim=cfg.resolution_conditioning_hidden_dim,
+        ).to(device=state.device, dtype=state.unet_dtype)
+        install_resolution_conditioner(state.unet, conditioner)
+        state.resolution_conditioner = conditioner
+        summary["resolution_conditioning"] = resolution_condition_schema(
+            hidden_dim=cfg.resolution_conditioning_hidden_dim)
+        print(
+            "Resolution conditioner PASS: "
+            f"output={conditioner.output_dim} hidden={conditioner.hidden_dim} "
+            "zero-output identity=PASS")
+    if cfg.p4_enabled:
+        install_p4_blocks(
+            state.unet,
+            sites=cfg.p4_insertions,
+            variant=cfg.p4_variant,
+            hidden_dim=cfg.p4_hidden_dim,
+            heads=cfg.p4_heads,
+            ff_mult=cfg.p4_ff_mult,
+            rope_base=cfg.p4_rope_base,
+            timestep_adaln=cfg.p4_timestep_adaln,
+        )
+        summary["p4"] = p4_schema(
+            enabled=True,
+            variant=cfg.p4_variant,
+            sites=cfg.p4_insertions,
+            hidden_dim=(cfg.p4_hidden_dim or state.unet.config.block_out_channels[-1]),
+            heads=cfg.p4_heads,
+            ff_mult=cfg.p4_ff_mult,
+            rope_base=cfg.p4_rope_base,
+            timestep_adaln=cfg.p4_timestep_adaln)
+        print(
+            "P4 blocks installed: "
+            f"variant={cfg.p4_variant} sites={cfg.p4_insertions} "
+            "external_gate_init=0")
+    return summary
+
+
+def sidecar_identity_smoke(
+    state, cfg, baseline_output: torch.Tensor, context: torch.Tensor,
+    latent: torch.Tensor, timestep: torch.Tensor,
+) -> dict:
+    """Verify sidecars preserve the exact U-Net output at step zero."""
+    if (not cfg.p4_smoke_identity_check
+            or (not cfg.p4_enabled and not cfg.resolution_conditioning_enabled)):
+        return {}
+    with torch.no_grad():
+        with model_autocast(state):
+            output = camera_conditioned_unet(
+                state.unet, latent, timestep,
+                encoder_hidden_states=context.to(dtype=state.unet_dtype),
+            ).sample
+    max_abs = float((output - baseline_output).detach().abs().max().cpu())
+    if max_abs != 0.0:
+        raise RuntimeError(
+            "Sidecar step-0 identity smoke failed: "
+            f"max_abs_diff={max_abs:.8g}")
+    print("Sidecar step-0 identity smoke PASS: max_abs_diff=0")
+    return {"step0_identity_max_abs_diff": max_abs}
 
 
 def load_initial_sara_patch(state, cfg, encoder) -> dict | None:
@@ -286,12 +375,15 @@ def heldout_diffusion_loss(state, cfg, encoder) -> float | None:
                     raise RuntimeError(
                         "Held-out loader exceeded validation_max_samples")
                 noisy = state.scheduler.add_noise(latent, noise, timestep)
+                resolution_condition = resolution_condition_for_batch(
+                    batch, latent, cfg, training=False)
                 context, _ = encoder.encode(
                     captions, track_truncation=False)
                 with model_autocast(state):
                     prediction = camera_conditioned_unet(
                         state.unet, noisy, timestep,
                         encoder_hidden_states=context.to(dtype=state.unet_dtype),
+                        resolution_condition=resolution_condition,
                     ).sample
                     per_sample_losses.extend(masked_per_sample_mse(
                         prediction, noise, image_mask).detach().cpu().tolist())
@@ -409,6 +501,10 @@ def main():
             output = state.unet(latent, timestep, encoder_hidden_states=context).sample
         if not torch.isfinite(output).all():
             raise RuntimeError("LongCLIP U-Net smoke forward emitted NaN/Inf")
+        smoke_context = context
+        smoke_latent = latent
+        smoke_timestep = timestep
+        smoke_output = output.detach().clone()
     print(f"LongCLIP direct U-Net smoke PASS: context={tuple(context.shape)}")
 
     sara_summary = build_sara_attn2_kv_sparse_masks(
@@ -421,6 +517,9 @@ def main():
     sara_summary = force_include_initial_sara_masks(
         state.unet, sara_summary, initial_sparse_values)
     baseline = capture_sara_selected_values(state.unet)
+    sidecar_summary = install_longclip_sidecars(state, cfg)
+    sidecar_smoke = sidecar_identity_smoke(
+        state, cfg, smoke_output, smoke_context, smoke_latent, smoke_timestep)
     hooks = install_sara_gradient_masks(state.unet)
     trainable = [p for p in state.unet.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=cfg.sara_lr,
@@ -471,11 +570,14 @@ def main():
                         0, state.scheduler.config.num_train_timesteps,
                         (len(captions),), device=device).long()
                     noisy = state.scheduler.add_noise(latent, noise, timestep)
+                    resolution_condition = resolution_condition_for_batch(
+                        batch, latent, cfg, training=True)
                     context, _ = encoder.encode(captions)
                 with model_autocast(state):
                     prediction = camera_conditioned_unet(
                         state.unet, noisy, timestep,
                         encoder_hidden_states=context.to(dtype=state.unet_dtype),
+                        resolution_condition=resolution_condition,
                     ).sample
                     loss = masked_mse(prediction, noise, image_mask)
                 if not torch.isfinite(loss):
@@ -485,6 +587,7 @@ def main():
                 if accumulation < cfg.gradient_accumulation_steps:
                     continue
                 torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip_norm)
+                p4_metrics_before_step = p4_telemetry(state.unet)
                 optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
@@ -494,12 +597,16 @@ def main():
                 if step % 25 == 0 or step == 1:
                     print(f"longclip_sara step {step}: loss={loss.item():.6f} "
                           f"lr={optimizer.param_groups[0]['lr']:.3g}")
+                    if p4_metrics_before_step:
+                        print(f"longclip_sara p4 telemetry step {step}: {p4_metrics_before_step}")
                 if wandb is not None:
-                    wandb.log({
+                    payload = {
                         "longclip_sara/step": step,
                         "longclip_sara/loss": float(loss.item()),
                         "longclip_sara/lr": optimizer.param_groups[0]["lr"],
-                    }, step=step)
+                    }
+                    payload.update(p4_metrics_before_step)
+                    wandb.log(payload, step=step)
                 if (cfg.validation_every_opt_steps
                         and step % cfg.validation_every_opt_steps == 0):
                     val_loss = heldout_diffusion_loss(state, cfg, encoder)
@@ -521,6 +628,7 @@ def main():
                     if param.grad is not None:
                         param.grad.mul_(scale)
             torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip_norm)
+            p4_metrics_before_step = p4_telemetry(state.unet)
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -584,11 +692,18 @@ def main():
     artifact = {
         "longclip_sara_schema": longclip_sara_schema(cfg, encoder),
         "sparse_values": collect_sara_sparse_values(state.unet),
+        "resolution_conditioner_state_dict": (
+            {k: v.detach().cpu() for k, v in state.unet.class_embedding.state_dict().items()}
+            if cfg.resolution_conditioning_enabled else None),
+        "p4_state_dict": p4_state_dict(state.unet) if cfg.p4_enabled else None,
+        "sidecar_summary": sidecar_summary,
+        "sidecar_smoke": sidecar_smoke,
         "sara_sparse_summary": sara_summary,
         "sara_selected_delta": delta,
         "validation_gate": validation_summary,
         "training_summary": {
             "truncated_training_prompts": encoder.truncated_prompt_count,
+            "p4_final_telemetry": p4_telemetry(state.unet),
         },
         "completion": {"completed": True, "optimizer_steps": step},
         "run_config": cfg.to_dict(),

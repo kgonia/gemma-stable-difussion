@@ -85,9 +85,17 @@ from pure_ella.longclip_sara import (
     longclip_sara_schema,
     validate_longclip_sara_checkpoint,
 )
+from pure_ella.p4 import P4DeltaBlock, apply_axial_2d_rope
+from pure_ella.resolution import (
+    ResolutionConditioner,
+    make_resolution_condition,
+    make_resolution_condition_from_latents,
+)
 from scripts.train_longclip_sara import (
     fixed_validation_timesteps,
     heldout_diffusion_loss,
+    masked_per_sample_mse as longclip_masked_per_sample_mse,
+    relative_prediction_rms,
     validation_skip_reason,
 )
 
@@ -144,18 +152,17 @@ class ConnectorTrainingTests(unittest.TestCase):
             "caption": ["first long caption", "second long caption"],
             "image": torch.zeros(2, 4, 2, 2),
         }
-        encoder = SimpleNamespace(encode=lambda captions: (
+        encoder = SimpleNamespace(encode=lambda captions, **kwargs: (
             torch.zeros(len(captions), 248, 768),
-            torch.ones(len(captions), 248, dtype=torch.long),
-        ))
+            torch.ones(len(captions), 248, dtype=torch.long)))
         torch.manual_seed(919)
         before = torch.random.get_rng_state().clone()
         with patch(
                 "scripts.train_longclip_sara.make_streaming_dataloader",
                 return_value=[batch]):
-            first = heldout_diffusion_loss(state, cfg, encoder, opt_step=250)
+            first = heldout_diffusion_loss(state, cfg, encoder)
             middle = torch.random.get_rng_state().clone()
-            second = heldout_diffusion_loss(state, cfg, encoder, opt_step=500)
+            second = heldout_diffusion_loss(state, cfg, encoder)
             after = torch.random.get_rng_state().clone()
 
         self.assertEqual(first, second)
@@ -166,6 +173,71 @@ class ConnectorTrainingTests(unittest.TestCase):
             [0, 250, 500, 749, 999])
         cfg.validation_max_samples = 0
         self.assertEqual(validation_skip_reason(cfg), "validation_max_samples=0")
+
+    def test_longclip_validation_is_independent_of_batch_grouping(self):
+        prediction = torch.tensor([
+            [[[1.0, 2.0], [3.0, 4.0]]],
+            [[[2.0, 4.0], [6.0, 8.0]]],
+        ])
+        target = torch.zeros_like(prediction)
+        mask = torch.tensor([
+            [[[1.0, 1.0], [1.0, 1.0]]],
+            [[[1.0, 0.0], [1.0, 0.0]]],
+        ])
+        together = longclip_masked_per_sample_mse(
+            prediction, target, mask)
+        separate = torch.cat([
+            longclip_masked_per_sample_mse(
+                prediction[index:index + 1], target[index:index + 1],
+                mask[index:index + 1])
+            for index in range(2)
+        ])
+        self.assertTrue(torch.equal(together, separate))
+        self.assertAlmostEqual(float(together.mean()), float(separate.mean()))
+
+    def test_longclip_validation_requires_the_declared_sample_count(self):
+        cfg = LongClipSaraConfig(
+            sd_checkpoint="stylejourney.safetensors",
+            longclip_repo="repo", longclip_checkpoint="model.pt",
+            output_dir="output", data_sources=["train.parquet"],
+            validation_data_sources=["validation.parquet"],
+            validation_max_samples=2, train_batch_size=1,
+            aspect_ratio_buckets=[(64, 64)], max_image_dimension=64,
+        )
+        class Distribution:
+            def mode(self): return torch.zeros(1, 4, 2, 2)
+        state = SimpleNamespace(
+            cfg=cfg, device=torch.device("cpu"), unet_dtype=torch.float32,
+            autocast_dtype=None,
+            vae=SimpleNamespace(
+                config=SimpleNamespace(scaling_factor=1.0),
+                encode=lambda image: SimpleNamespace(latent_dist=Distribution())),
+            scheduler=SimpleNamespace(
+                config=SimpleNamespace(num_train_timesteps=1000),
+                add_noise=lambda latent, noise, timestep: latent + noise),
+            unet=nn.Identity(),
+        )
+        # The count check occurs after model evaluation, so reuse the small
+        # fake from the deterministic test via a one-sample functional UNet.
+        state.unet = SimpleNamespace(
+            training=True, eval=lambda: None, train=lambda mode=True: None)
+        batch = {"caption": ["only one"], "image": torch.zeros(1, 4, 2, 2)}
+        encoder = SimpleNamespace(encode=lambda captions, **kwargs: (
+            torch.zeros(len(captions), 248, 768),
+            torch.ones(len(captions), 248, dtype=torch.long)))
+        with patch(
+                "scripts.train_longclip_sara.make_streaming_dataloader",
+                return_value=[batch]), patch(
+                "scripts.train_longclip_sara.camera_conditioned_unet",
+                return_value=SimpleNamespace(sample=torch.zeros(1, 4, 2, 2))):
+            with self.assertRaisesRegex(RuntimeError, "expected 2 samples"):
+                heldout_diffusion_loss(state, cfg, encoder)
+
+    def test_longclip_short_prompt_relative_rms(self):
+        baseline = torch.ones(2, 3)
+        self.assertEqual(relative_prediction_rms(baseline, baseline), 0.0)
+        self.assertAlmostEqual(
+            relative_prediction_rms(baseline * 1.1, baseline), 0.1, places=6)
 
     def test_longclip_sara_config_keeps_the_native_direct_contract(self):
         cfg = LongClipSaraConfig(
@@ -184,6 +256,79 @@ class ConnectorTrainingTests(unittest.TestCase):
                 longclip_repo="repo", longclip_checkpoint="model.pt",
                 output_dir="output", data_sources=["train.parquet"],
                 context_tokens=77,
+            )
+
+    def test_resolution_conditioner_zero_init_and_latent_features(self):
+        conditioner = ResolutionConditioner(output_dim=6, hidden_dim=8)
+        labels = make_resolution_condition(1024, 512, batch_size=2)
+        self.assertEqual(labels.tolist(), [[0.0, -1.0], [0.0, -1.0]])
+        latent_labels = make_resolution_condition_from_latents(
+            torch.zeros(3, 4, 80, 128))
+        self.assertEqual(latent_labels.shape, (3, 2))
+        self.assertAlmostEqual(float(latent_labels[0, 0]), 0.0)
+        self.assertAlmostEqual(float(latent_labels[0, 1]), -0.6780719)
+        output = conditioner(labels)
+        self.assertTrue(torch.equal(output, torch.zeros_like(output)))
+
+    def test_p4_rope_contract_and_shape(self):
+        q = torch.randn(2, 4, 12, 8)
+        k = torch.randn(2, 4, 12, 8)
+        qr, kr = apply_axial_2d_rope(q, k, h=3, w=4, base=10000.0)
+        self.assertEqual(qr.shape, q.shape)
+        self.assertEqual(kr.shape, k.shape)
+        self.assertFalse(torch.equal(qr, q))
+        with self.assertRaisesRegex(ValueError, "head_dim % 4"):
+            apply_axial_2d_rope(
+                torch.randn(1, 2, 4, 6), torch.randn(1, 2, 4, 6), h=2, w=2)
+
+    def test_p4_block_exact_zero_gate_identity_and_gradients(self):
+        torch.manual_seed(123)
+        block = P4DeltaBlock(
+            channels=8, time_embed_dim=16, hidden_dim=16, heads=4,
+            ff_mult=1.5, use_rope=True, site="pre_mid")
+        x = torch.randn(2, 8, 3, 4, requires_grad=True)
+        temb = torch.randn(2, 16)
+        out = block(x, temb)
+        self.assertTrue(torch.equal(out, x))
+        self.assertGreater(block.last_branch_rms, 0.0)
+
+        probe = torch.randn_like(out)
+        (out * probe).sum().backward()
+        gate_grad = block.gate.grad
+        self.assertIsNotNone(gate_grad)
+        assert gate_grad is not None
+        self.assertGreater(abs(float(gate_grad)), 0.0)
+
+        block.zero_grad(set_to_none=True)
+        x.grad = None
+        with torch.no_grad():
+            block.gate.fill_(0.1)
+        out_open = block(x, temb)
+        (out_open * probe).sum().backward()
+        branch_grad_norm = sum(
+            float(param.grad.detach().abs().sum())
+            for name, param in block.named_parameters()
+            if name != "gate" and param.grad is not None
+        )
+        self.assertGreater(branch_grad_norm, 0.0)
+
+    def test_longclip_config_validates_p4_rope_head_dim(self):
+        LongClipSaraConfig(
+            sd_checkpoint="stylejourney.safetensors",
+            longclip_repo="/tmp/Long-CLIP",
+            longclip_checkpoint="/tmp/longclip-L.pt",
+            output_dir="output", data_sources=["train.parquet"],
+            p4_enabled=True, p4_variant="rope", p4_hidden_dim=1280,
+            p4_heads=8,
+        )
+        with self.assertRaisesRegex(ValueError, "per-head dim divisible by 4"):
+            LongClipSaraConfig(
+                sd_checkpoint="stylejourney.safetensors",
+                longclip_repo="/tmp/Long-CLIP",
+                longclip_checkpoint="/tmp/longclip-L.pt",
+                output_dir="output", data_sources=["train.parquet"],
+                p4_enabled=True, p4_variant="rope", p4_hidden_dim=18,
+                p4_heads=3,
             )
 
     def test_longclip_sara_schema_pins_encoder_and_sparse_selection(self):
@@ -208,6 +353,7 @@ class ConnectorTrainingTests(unittest.TestCase):
                 "longclip_sara_schema": schema,
                 "completion": {"completed": True, "optimizer_steps": 1},
                 "sparse_values": {"unet.attn2.to_k.weight": {"values": torch.ones(1)}},
+                "validation_gate": {"passed": True},
             }
             validate_longclip_sara_checkpoint(checkpoint, cfg, FakeEncoder(), "test")
             checkpoint["completion"] = {"completed": True, "optimizer_steps": 0}
