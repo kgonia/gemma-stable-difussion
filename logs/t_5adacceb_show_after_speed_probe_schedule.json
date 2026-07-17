@@ -1,0 +1,71 @@
+{
+  "task": {
+    "id": "t_5adacceb",
+    "title": "GPU: LongCLIP resolution+P4a no-PE smoke-10",
+    "body": "GPU UUID: GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd\nCUDA device: cuda:0 via CUDA_VISIBLE_DEVICES=0\nLock: /tmp/hermes-gpu-0.lock\nRepository: /home/krz/PycharmProjects/gemma-stable-difussion\nGit commit: c0b2d9afec1b92cc9c1768e58e53cbcf9f18e466\nWorking directory: /home/krz/PycharmProjects/gemma-stable-difussion\nConfig: /home/krz/PycharmProjects/gemma-stable-difussion/config_longclip_sara_15pct_plus_monet4_resolution_p4a_smoke_10.json\nConfig arm: resolution_conditioning_enabled=true; p4_enabled=true; p4_variant=no_pe\nDatasets:\n- Unsplash: /mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/train.parquet\n- Unsplash validation: /mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/validation.parquet\n- Monet: /mnt/e/data/monet/v1.2.0/cc12m/0-0/00000[0-3].tar\nCommand:\n./scripts/run_longclip_sara_gpu_queue.sh config_longclip_sara_15pct_plus_monet4_resolution_p4a_smoke_10.json logs/queued_longclip_resolution_p4a_smoke_10.log GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd\nLog: /home/krz/PycharmProjects/gemma-stable-difussion/logs/queued_longclip_resolution_p4a_smoke_10.log\nPrimary output checkpoint: /home/krz/PycharmProjects/gemma-stable-difussion/output_longclip_sara_15pct_plus_monet4_resolution_p4a_smoke_10/longclip_sara_unet_attn2_kv_sparse.pt\nAcceptance:\n1. Run exactly the command above from the working directory; do not launch outside /tmp/hermes-gpu-0.lock.\n2. The runner must acquire /tmp/hermes-gpu-0.lock, verify GPU UUID GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd, and refuse unexpected compute processes.\n3. Command exits 0 and log exists at /home/krz/PycharmProjects/gemma-stable-difussion/logs/queued_longclip_resolution_p4a_smoke_10.log.\n4. Checkpoint exists at /home/krz/PycharmProjects/gemma-stable-difussion/output_longclip_sara_15pct_plus_monet4_resolution_p4a_smoke_10/longclip_sara_unet_attn2_kv_sparse.pt.\n5. Verify checkpoint with a CPU-side torch.load: completion.completed is true, optimizer_steps > 0, longclip_sara_schema contains resolution_conditioning and p4.variant == 'no_pe', sidecar_smoke is present, validation_gate.passed is true.\n6. Preserve log tail, output path, checkpoint size, sha256, runtime, and any validation per-bucket summary in the card handoff.\nFailure handling:\n- Exit 75 means GPU lock unavailable; comment/block, do not bypass.\n- Exit 76 means unexpected GPU process; comment/block with nvidia-smi evidence, do not kill unless explicitly instructed.\n- On OOM or validation failure, preserve first failing traceback/log and block; do not scale or retry blindly.\n",
+    "assignee": "coder",
+    "status": "todo",
+    "priority": 0,
+    "tenant": null,
+    "workspace_kind": "dir",
+    "workspace_path": "/home/krz/PycharmProjects/gemma-stable-difussion",
+    "branch_name": null,
+    "project_id": null,
+    "created_by": "gpu-queue",
+    "created_at": 1784298297,
+    "started_at": null,
+    "completed_at": null,
+    "result": null,
+    "skills": [
+      "gpu-kanban-queue"
+    ],
+    "max_retries": 1,
+    "session_id": null,
+    "workflow_template_id": null,
+    "current_step_key": null
+  },
+  "latest_summary": null,
+  "parents": [
+    "t_b0b90333"
+  ],
+  "children": [
+    "t_0bc39d3f"
+  ],
+  "comments": [
+    {
+      "author": "gpu-queue",
+      "body": "Updated validation-gate acceptance after commit 929b766: checkpoint verification must confirm validation_gate.passed is true AND validation_gate.heldout_ran=true, heldout_passed=true, finite baseline_loss/final_loss/relative_change, validation_gate.short_prompt_ran=true, short_prompt_passed=true, and finite short_prompt_relative_rms. Do not accept aggregate passed=true alone.",
+      "created_at": 1784309481
+    }
+  ],
+  "events": [
+    {
+      "kind": "created",
+      "payload": {
+        "assignee": "coder",
+        "status": "todo",
+        "parents": [
+          "t_b0b90333"
+        ],
+        "tenant": null,
+        "branch_name": null,
+        "skills": [
+          "gpu-kanban-queue"
+        ],
+        "goal_mode": true
+      },
+      "created_at": 1784298297,
+      "run_id": null
+    },
+    {
+      "kind": "commented",
+      "payload": {
+        "author": "gpu-queue",
+        "len": 378
+      },
+      "created_at": 1784309481,
+      "run_id": null
+    }
+  ],
+  "runs": []
+}

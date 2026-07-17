@@ -1,0 +1,46 @@
+{
+  "created_at": 1784319005,
+  "probe_task": "t_189ffc5c",
+  "chain": [
+    {
+      "id": "t_5adacceb",
+      "status": "todo",
+      "title": "GPU: LongCLIP resolution+P4a no-PE smoke-10",
+      "parents": [
+        "t_b0b90333"
+      ]
+    },
+    {
+      "id": "t_0bc39d3f",
+      "status": "todo",
+      "title": "GPU: LongCLIP resolution+P4b RoPE smoke-10",
+      "parents": [
+        "t_5adacceb"
+      ]
+    },
+    {
+      "id": "t_189ffc5c",
+      "status": "todo",
+      "title": "GPU: LongCLIP resolution+P4b speed/VRAM probe",
+      "parents": [
+        "t_0bc39d3f"
+      ]
+    },
+    {
+      "id": "t_32c746f7",
+      "status": "todo",
+      "title": "GPU: LongCLIP resolution+P4a no-PE Monet4 full",
+      "parents": [
+        "t_189ffc5c"
+      ]
+    },
+    {
+      "id": "t_2f5b8c30",
+      "status": "todo",
+      "title": "GPU: LongCLIP resolution+P4b RoPE Monet4 full",
+      "parents": [
+        "t_32c746f7"
+      ]
+    }
+  ]
+}
