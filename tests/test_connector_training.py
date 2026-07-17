@@ -80,12 +80,14 @@ from pure_ella.longclip_sara import (
     LONGCLIP_L_CONTEXT_TOKENS,
     LONGCLIP_L_WIDTH,
     LongClipSaraConfig,
+    install_longclip_sara_sidecars,
     is_longclip_context_overflow,
+    load_longclip_sara_checkpoint,
     longclip_attention_mask,
     longclip_sara_schema,
     validate_longclip_sara_checkpoint,
 )
-from pure_ella.p4 import P4DeltaBlock, apply_axial_2d_rope
+from pure_ella.p4 import P4DeltaBlock, apply_axial_2d_rope, p4_state_dict
 from pure_ella.resolution import (
     ResolutionConditioner,
     make_resolution_condition,
@@ -151,6 +153,7 @@ class ConnectorTrainingTests(unittest.TestCase):
         batch = {
             "caption": ["first long caption", "second long caption"],
             "image": torch.zeros(2, 4, 2, 2),
+            "bucket": torch.tensor([640, 1024]),
         }
         encoder = SimpleNamespace(encode=lambda captions, **kwargs: (
             torch.zeros(len(captions), 248, 768),
@@ -166,6 +169,9 @@ class ConnectorTrainingTests(unittest.TestCase):
             after = torch.random.get_rng_state().clone()
 
         self.assertEqual(first, second)
+        self.assertEqual(
+            state.longclip_validation_bucket_summary["buckets"]["640x1024"]["count"],
+            2)
         self.assertTrue(torch.equal(before, middle))
         self.assertTrue(torch.equal(before, after))
         self.assertEqual(
@@ -330,6 +336,115 @@ class ConnectorTrainingTests(unittest.TestCase):
                 p4_enabled=True, p4_variant="rope", p4_hidden_dim=18,
                 p4_heads=3,
             )
+
+    def test_longclip_config_rejects_resolution_dropout(self):
+        with self.assertRaisesRegex(ValueError, "resolution_conditioning_dropout_prob must be 0.0"):
+            LongClipSaraConfig(
+                sd_checkpoint="stylejourney.safetensors",
+                longclip_repo="/tmp/Long-CLIP",
+                longclip_checkpoint="/tmp/longclip-L.pt",
+                output_dir="output", data_sources=["train.parquet"],
+                resolution_conditioning_enabled=True,
+                resolution_conditioning_dropout_prob=0.1,
+            )
+
+    def test_longclip_sidecar_checkpoint_loader_restores_strict_state(self):
+        class Down(nn.Module):
+            def forward(self, hidden_states, temb=None, **kwargs):
+                return hidden_states + 0.25, (hidden_states,)
+
+        class Mid(nn.Module):
+            def forward(self, hidden_states, temb=None, **kwargs):
+                return hidden_states * 1.5
+
+        class TimeEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear_2 = nn.Linear(16, 16)
+
+        class FakeUNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(block_out_channels=[8])
+                self.time_embedding = TimeEmbedding()
+                self.down_blocks = nn.ModuleList([Down()])
+                self.mid_block = Mid()
+                self.class_embedding = None
+                self.anchor = nn.Parameter(torch.zeros(2))
+
+            def forward(self, sample, timestep, encoder_hidden_states,
+                        class_labels=None):
+                temb = torch.ones(sample.shape[0], 16, dtype=sample.dtype)
+                if self.class_embedding is not None:
+                    temb = temb + self.class_embedding(class_labels).to(dtype=temb.dtype)
+                hidden, _ = self.down_blocks[-1](sample + self.anchor[0], temb=temb)
+                hidden = self.mid_block(hidden, temb=temb)
+                return SimpleNamespace(sample=hidden)
+
+        class FakeEncoder:
+            def provenance(self):
+                return {"checkpoint_sha256": "abc", "context_tokens": 248}
+
+        with tempfile.TemporaryDirectory() as directory:
+            sd_checkpoint = Path(directory) / "stylejourney.safetensors"
+            sd_checkpoint.write_bytes(b"stylejourney")
+            cfg = LongClipSaraConfig(
+                sd_checkpoint=str(sd_checkpoint), longclip_repo="repo",
+                longclip_checkpoint="model.pt", output_dir="output",
+                data_sources=["train.parquet"],
+                require_short_prompt_regression_gate=False,
+                resolution_conditioning_enabled=True,
+                p4_enabled=True, p4_variant="no_pe", p4_hidden_dim=16,
+                p4_heads=4,
+            )
+            encoder = FakeEncoder()
+            source = FakeUNet()
+            install_longclip_sara_sidecars(source, cfg)
+            with torch.no_grad():
+                source.anchor[0] = 1.25
+                source.class_embedding.output.bias.fill_(0.125)
+                source.p4_blocks["pre_mid"].gate.fill_(0.2)
+            checkpoint = {
+                "longclip_sara_schema": longclip_sara_schema(cfg, encoder),
+                "sparse_values": {
+                    "anchor": {
+                        "mask": torch.tensor([True, False]),
+                        "values": torch.tensor([1.25]),
+                        "shape": (2,),
+                    }
+                },
+                "resolution_conditioner_state_dict": {
+                    key: value.detach().clone()
+                    for key, value in source.class_embedding.state_dict().items()
+                },
+                "p4_state_dict": p4_state_dict(source),
+                "validation_gate": {"passed": True},
+                "completion": {"completed": True, "optimizer_steps": 1},
+                "run_config": cfg.to_dict(),
+            }
+            target = FakeUNet()
+            loaded = load_longclip_sara_checkpoint(
+                target, checkpoint, cfg, encoder, "unit")
+            self.assertEqual(loaded["sparse_values"], 1)
+            self.assertGreater(loaded["sidecars"]["resolution_tensors"], 0)
+            self.assertGreater(loaded["sidecars"]["p4_tensors"], 0)
+            sample = torch.randn(2, 8, 3, 4)
+            timestep = torch.ones(2, dtype=torch.long)
+            context = torch.zeros(2, 1, 1)
+            labels = make_resolution_condition(1024, 512, batch_size=2)
+            source_out = source(
+                sample, timestep, encoder_hidden_states=context,
+                class_labels=labels).sample
+            target_out = target(
+                sample, timestep, encoder_hidden_states=context,
+                class_labels=labels).sample
+            self.assertTrue(torch.allclose(source_out, target_out, atol=0, rtol=0))
+
+            missing_p4 = dict(checkpoint)
+            missing_p4.pop("p4_state_dict")
+            with self.assertRaisesRegex(RuntimeError, "missing p4_state_dict"):
+                load_longclip_sara_checkpoint(
+                    FakeUNet(), missing_p4, cfg, encoder, "missing")
 
     def test_longclip_sara_schema_pins_encoder_and_sparse_selection(self):
         with tempfile.TemporaryDirectory() as directory:

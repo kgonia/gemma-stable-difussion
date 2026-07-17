@@ -176,8 +176,10 @@ class LongClipSaraConfig:
             raise ValueError("lr_decay_steps must be >= lr_warmup_steps")
         if self.resolution_conditioning_hidden_dim < 1:
             raise ValueError("resolution_conditioning_hidden_dim must be positive")
-        if not 0 <= self.resolution_conditioning_dropout_prob <= 1:
-            raise ValueError("resolution_conditioning_dropout_prob must be in [0, 1]")
+        if self.resolution_conditioning_dropout_prob != 0.0:
+            raise ValueError(
+                "resolution_conditioning_dropout_prob must be 0.0; "
+                "resolution is always known and dropout/unknown alias real 1024x1024")
         if self.p4_variant not in {"no_pe", "rope"}:
             raise ValueError("p4_variant must be 'no_pe' or 'rope'")
         if self.p4_enabled:
@@ -355,8 +357,127 @@ def validate_longclip_sara_checkpoint(
             f"LongCLIP SaRA checkpoint {source} is incomplete or has zero updates")
     if not checkpoint.get("sparse_values"):
         raise RuntimeError(f"LongCLIP SaRA checkpoint {source} has no sparse values")
+    if cfg.resolution_conditioning_enabled:
+        state_dict = checkpoint.get("resolution_conditioner_state_dict")
+        if not isinstance(state_dict, dict) or not state_dict:
+            raise RuntimeError(
+                f"LongCLIP SaRA checkpoint {source} is missing "
+                "resolution_conditioner_state_dict")
+    elif checkpoint.get("resolution_conditioner_state_dict") is not None:
+        raise RuntimeError(
+            f"LongCLIP SaRA checkpoint {source} has unexpected "
+            "resolution_conditioner_state_dict")
+    if cfg.p4_enabled:
+        state_dict = checkpoint.get("p4_state_dict")
+        if not isinstance(state_dict, dict) or not state_dict:
+            raise RuntimeError(
+                f"LongCLIP SaRA checkpoint {source} is missing p4_state_dict")
+    elif checkpoint.get("p4_state_dict") is not None:
+        raise RuntimeError(
+            f"LongCLIP SaRA checkpoint {source} has unexpected p4_state_dict")
     gate = checkpoint.get("validation_gate")
     if (cfg.require_validation_gate or cfg.require_short_prompt_regression_gate):
         if not isinstance(gate, dict) or gate.get("passed") is not True:
             raise RuntimeError(
                 f"LongCLIP SaRA checkpoint {source} did not pass validation gates")
+
+
+def install_longclip_sara_sidecars(unet, cfg: LongClipSaraConfig) -> dict[str, dict | None]:
+    """Install configured resolution/P4 sidecars on a loaded SD U-Net.
+
+    This is the canonical installer used by training, inference, generation, and
+    checkpoint reload tests.  Resolution and P4 modules are trainable by default;
+    callers that build SaRA masks must install them after mask construction.
+    """
+    summary: dict[str, dict | None] = {"resolution_conditioning": None, "p4": None}
+    device = next(unet.parameters()).device
+    dtype = next(unet.parameters()).dtype
+    if cfg.resolution_conditioning_enabled:
+        from pure_ella.resolution import (
+            ResolutionConditioner,
+            install_resolution_conditioner,
+            resolution_condition_schema,
+        )
+        existing = getattr(unet, "class_embedding", None)
+        if existing is None:
+            conditioner = ResolutionConditioner(
+                output_dim=unet.time_embedding.linear_2.out_features,
+                hidden_dim=cfg.resolution_conditioning_hidden_dim,
+            ).to(device=device, dtype=dtype)
+            install_resolution_conditioner(unet, conditioner)
+        elif not isinstance(existing, ResolutionConditioner):
+            raise RuntimeError(
+                "Cannot install LongCLIP resolution sidecar: U-Net already has "
+                f"class_embedding={type(existing).__name__}")
+        summary["resolution_conditioning"] = resolution_condition_schema(
+            hidden_dim=cfg.resolution_conditioning_hidden_dim)
+    if cfg.p4_enabled:
+        from pure_ella.p4 import install_p4_blocks, p4_schema
+        if not hasattr(unet, "p4_blocks"):
+            install_p4_blocks(
+                unet,
+                sites=cfg.p4_insertions,
+                variant=cfg.p4_variant,
+                hidden_dim=cfg.p4_hidden_dim,
+                heads=cfg.p4_heads,
+                ff_mult=cfg.p4_ff_mult,
+                rope_base=cfg.p4_rope_base,
+                timestep_adaln=cfg.p4_timestep_adaln,
+            )
+        summary["p4"] = p4_schema(
+            enabled=True,
+            variant=cfg.p4_variant,
+            sites=cfg.p4_insertions,
+            hidden_dim=(cfg.p4_hidden_dim or unet.config.block_out_channels[-1]),
+            heads=cfg.p4_heads,
+            ff_mult=cfg.p4_ff_mult,
+            rope_base=cfg.p4_rope_base,
+            timestep_adaln=cfg.p4_timestep_adaln)
+    return summary
+
+
+def load_longclip_sara_sidecar_state(unet, checkpoint: dict, cfg: LongClipSaraConfig,
+                                     source: str) -> dict[str, int]:
+    """Strictly load resolution/P4 sidecar state into already-installed modules."""
+    loaded = {"resolution_tensors": 0, "p4_tensors": 0}
+    if cfg.resolution_conditioning_enabled:
+        from pure_ella.resolution import ResolutionConditioner
+        install_longclip_sara_sidecars(unet, cfg)
+        conditioner = getattr(unet, "class_embedding", None)
+        if not isinstance(conditioner, ResolutionConditioner):
+            raise RuntimeError(f"Resolution sidecar was not installed for {source}")
+        state_dict = checkpoint["resolution_conditioner_state_dict"]
+        conditioner.load_state_dict(state_dict, strict=True)
+        loaded["resolution_tensors"] = len(state_dict)
+    if cfg.p4_enabled:
+        install_longclip_sara_sidecars(unet, cfg)
+        blocks = getattr(unet, "p4_blocks", None)
+        if blocks is None:
+            raise RuntimeError(f"P4 sidecars were not installed for {source}")
+        state_dict = checkpoint["p4_state_dict"]
+        blocks.load_state_dict(state_dict, strict=True)
+        loaded["p4_tensors"] = len(state_dict)
+    return loaded
+
+
+def load_longclip_sara_checkpoint(
+    unet,
+    checkpoint: dict,
+    cfg: LongClipSaraConfig,
+    encoder: LongClipEncoder,
+    source: str,
+    *,
+    load_sparse: bool = True,
+    load_sidecars: bool = True,
+) -> dict[str, Any]:
+    """Validate and load a LongCLIP SaRA checkpoint without dropping sidecars."""
+    validate_longclip_sara_checkpoint(checkpoint, cfg, encoder, source)
+    result: dict[str, Any] = {"sparse_values": 0, "sidecars": {}}
+    if load_sidecars:
+        result["sidecars"] = load_longclip_sara_sidecar_state(
+            unet, checkpoint, cfg, source)
+    if load_sparse:
+        from pure_ella.sara import load_sara_sparse_values
+        result["sparse_values"] = load_sara_sparse_values(
+            unet, checkpoint["sparse_values"])
+    return result

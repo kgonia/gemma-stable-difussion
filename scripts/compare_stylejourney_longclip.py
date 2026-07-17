@@ -22,9 +22,8 @@ if __package__ in {None, ""}:
 from pure_ella.config import TrainConfig, seed_everything
 from pure_ella.diagnostics import generate_clip_teacher, save_validation_grid
 from pure_ella.longclip_sara import (
-    LongClipEncoder, LongClipSaraConfig, validate_longclip_sara_checkpoint,
+    LongClipEncoder, LongClipSaraConfig, load_longclip_sara_checkpoint,
 )
-from pure_ella.sara import load_sara_sparse_values
 from train import (
     TrainingState,
     load_clip,
@@ -88,10 +87,12 @@ def main():
             raise RuntimeError(
                 "LongCLIP SaRA patch was trained against a different "
                 "StyleJourney checkpoint")
-        validate_longclip_sara_checkpoint(
-            patch, patch_cfg, longclip, str(args.sara_patch))
-        loaded = load_sara_sparse_values(state.unet, patch["sparse_values"])
-        print(f"Applied LongCLIP SaRA patch: {loaded:,} sparse values")
+        loaded = load_longclip_sara_checkpoint(
+            state.unet, patch, patch_cfg, longclip, str(args.sara_patch))
+        print(
+            "Applied LongCLIP SaRA patch: "
+            f"{loaded['sparse_values']:,} sparse values, "
+            f"sidecars={loaded['sidecars']}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.requested_four:

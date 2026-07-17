@@ -9,7 +9,7 @@ import torch.nn as nn
 
 
 RESOLUTION_CONDITION_DIM = 2
-RESOLUTION_SCHEMA_VERSION = 1
+RESOLUTION_SCHEMA_VERSION = 2
 
 
 def resolution_condition_schema(*, hidden_dim: int) -> dict[str, Any]:
@@ -23,7 +23,7 @@ def resolution_condition_schema(*, hidden_dim: int) -> dict[str, Any]:
         },
         "source": "emitted_canvas_bucket_or_latent_shape",
         "hidden_dim": int(hidden_dim),
-        "unknown_centered": True,
+        "resolution_always_known": True,
     }
 
 
@@ -104,12 +104,6 @@ class ResolutionConditioner(nn.Module):
             )
         condition = condition.to(dtype=self.input.weight.dtype)
         return self.output(self.activation(self.input(condition)))
-
-    def unknown(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        return torch.zeros(
-            int(batch_size), RESOLUTION_CONDITION_DIM,
-            device=device, dtype=torch.float32)
-
 
 def install_resolution_conditioner(unet, conditioner: ResolutionConditioner) -> None:
     if getattr(unet, "class_embedding", None) is not None:

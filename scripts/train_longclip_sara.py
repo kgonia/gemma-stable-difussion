@@ -8,6 +8,7 @@ native 248x768 LongCLIP context directly.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -29,20 +30,15 @@ from pure_ella.diagnostics import (
     generate_clip_teacher, save_validation_grid, scheduler_for_generation_case,
 )
 from pure_ella.longclip_sara import (
-    LongClipEncoder, LongClipSaraConfig, longclip_sara_schema,
+    LongClipEncoder, LongClipSaraConfig, install_longclip_sara_sidecars,
+    load_longclip_sara_checkpoint, longclip_sara_schema,
 )
-from pure_ella.p4 import install_p4_blocks, p4_schema, p4_state_dict, p4_telemetry
-from pure_ella.resolution import (
-    ResolutionConditioner,
-    install_resolution_conditioner,
-    make_resolution_condition_from_bucket,
-    resolution_condition_schema,
-)
+from pure_ella.p4 import p4_state_dict, p4_telemetry
+from pure_ella.resolution import make_resolution_condition_from_bucket
 from pure_ella.sara import (
     build_sara_attn2_kv_sparse_masks, capture_sara_selected_values,
     collect_sara_sparse_values, install_sara_gradient_masks,
-    load_sara_sparse_values, remove_sara_gradient_masks,
-    sara_selected_delta_metrics,
+    remove_sara_gradient_masks, sara_selected_delta_metrics,
 )
 from train import (
     TrainingState, _as_prompt_list, camera_conditioned_unet, masked_mse,
@@ -67,53 +63,21 @@ def resolution_condition_for_batch(
 ) -> torch.Tensor | None:
     if not cfg.resolution_conditioning_enabled:
         return None
-    condition = make_resolution_condition_from_bucket(
+    return make_resolution_condition_from_bucket(
         batch["bucket"], batch_size=latent.shape[0], device=latent.device)
-    dropout = float(cfg.resolution_conditioning_dropout_prob) if training else 0.0
-    if dropout > 0:
-        mask = torch.rand(latent.shape[0], device=latent.device) < dropout
-        if mask.any():
-            condition = condition.clone()
-            condition[mask] = 0
-    return condition
 
 
 def install_longclip_sidecars(state, cfg) -> dict:
     """Install optional resolution/P4 sidecars after SaRA freezes base params."""
-    summary: dict[str, dict | None] = {"resolution_conditioning": None, "p4": None}
-    if cfg.resolution_conditioning_enabled:
-        conditioner = ResolutionConditioner(
-            output_dim=state.unet.time_embedding.linear_2.out_features,
-            hidden_dim=cfg.resolution_conditioning_hidden_dim,
-        ).to(device=state.device, dtype=state.unet_dtype)
-        install_resolution_conditioner(state.unet, conditioner)
-        state.resolution_conditioner = conditioner
-        summary["resolution_conditioning"] = resolution_condition_schema(
-            hidden_dim=cfg.resolution_conditioning_hidden_dim)
+    summary = install_longclip_sara_sidecars(state.unet, cfg)
+    if summary.get("resolution_conditioning") is not None:
+        state.resolution_conditioner = state.unet.class_embedding
         print(
             "Resolution conditioner PASS: "
-            f"output={conditioner.output_dim} hidden={conditioner.hidden_dim} "
+            f"output={state.unet.class_embedding.output_dim} "
+            f"hidden={state.unet.class_embedding.hidden_dim} "
             "zero-output identity=PASS")
-    if cfg.p4_enabled:
-        install_p4_blocks(
-            state.unet,
-            sites=cfg.p4_insertions,
-            variant=cfg.p4_variant,
-            hidden_dim=cfg.p4_hidden_dim,
-            heads=cfg.p4_heads,
-            ff_mult=cfg.p4_ff_mult,
-            rope_base=cfg.p4_rope_base,
-            timestep_adaln=cfg.p4_timestep_adaln,
-        )
-        summary["p4"] = p4_schema(
-            enabled=True,
-            variant=cfg.p4_variant,
-            sites=cfg.p4_insertions,
-            hidden_dim=(cfg.p4_hidden_dim or state.unet.config.block_out_channels[-1]),
-            heads=cfg.p4_heads,
-            ff_mult=cfg.p4_ff_mult,
-            rope_base=cfg.p4_rope_base,
-            timestep_adaln=cfg.p4_timestep_adaln)
+    if summary.get("p4") is not None:
         print(
             "P4 blocks installed: "
             f"variant={cfg.p4_variant} sites={cfg.p4_insertions} "
@@ -150,6 +114,7 @@ def load_initial_sara_patch(state, cfg, encoder) -> dict | None:
         return None
     path = Path(cfg.initial_sara_patch).expanduser()
     patch = torch.load(path, map_location="cpu", weights_only=True)
+    patch_cfg = LongClipSaraConfig(**patch["run_config"])
     expected = longclip_sara_schema(cfg, encoder)
     actual = patch.get("longclip_sara_schema")
     comparable_keys = (
@@ -161,22 +126,39 @@ def load_initial_sara_patch(state, cfg, encoder) -> dict | None:
             actual.get(key) != expected.get(key) for key in comparable_keys):
         raise RuntimeError(
             f"Initial LongCLIP SaRA patch provenance mismatch: {path}")
-    completion = patch.get("completion")
-    if (not isinstance(completion, dict)
-            or completion.get("completed") is not True
-            or completion.get("optimizer_steps", 0) <= 0):
-        raise RuntimeError(f"Initial LongCLIP SaRA patch is incomplete: {path}")
-    gate = patch.get("validation_gate")
-    if (cfg.require_validation_gate or cfg.require_short_prompt_regression_gate):
-        if not isinstance(gate, dict) or gate.get("passed") is not True:
-            raise RuntimeError(
-                f"Initial LongCLIP SaRA patch did not pass gates: {path}")
-    sparse_values = patch.get("sparse_values")
-    if not sparse_values:
-        raise RuntimeError(f"Initial LongCLIP SaRA patch has no sparse values: {path}")
-    loaded = load_sara_sparse_values(state.unet, sparse_values)
-    print(f"Initial LongCLIP SaRA endpoint loaded from {path}: {loaded:,} values")
+    if patch_cfg.resolution_conditioning_enabled or patch_cfg.p4_enabled:
+        expected_sidecars = longclip_sara_schema(cfg, encoder)
+        patch_sidecars = longclip_sara_schema(patch_cfg, encoder)
+        for key in ("resolution_conditioning", "p4"):
+            if patch_sidecars.get(key) != expected_sidecars.get(key):
+                raise RuntimeError(
+                    f"Initial LongCLIP SaRA sidecar schema mismatch for {key}: {path}")
+    loaded = load_longclip_sara_checkpoint(
+        state.unet, patch, patch_cfg, encoder, str(path),
+        load_sparse=True, load_sidecars=False)
+    sparse_values = patch["sparse_values"]
+    state.initial_longclip_sara_checkpoint = patch
+    state.initial_longclip_sara_patch_cfg = patch_cfg
+    state.initial_longclip_sara_patch_path = str(path)
+    print(
+        f"Initial LongCLIP SaRA endpoint loaded from {path}: "
+        f"{loaded['sparse_values']:,} sparse values")
     return sparse_values
+
+
+def load_initial_sidecar_state_after_install(state, encoder) -> dict[str, int] | None:
+    patch = getattr(state, "initial_longclip_sara_checkpoint", None)
+    patch_cfg = getattr(state, "initial_longclip_sara_patch_cfg", None)
+    source = getattr(state, "initial_longclip_sara_patch_path", "initial_sara_patch")
+    if patch is None or patch_cfg is None:
+        return None
+    if not (patch_cfg.resolution_conditioning_enabled or patch_cfg.p4_enabled):
+        return None
+    loaded = load_longclip_sara_checkpoint(
+        state.unet, patch, patch_cfg, encoder, source,
+        load_sparse=False, load_sidecars=True)
+    print(f"Initial LongCLIP SaRA sidecars loaded from {source}: {loaded['sidecars']}")
+    return loaded["sidecars"]
 
 
 def force_include_initial_sara_masks(unet, summary: dict, initial_sparse_values: dict | None) -> dict:
@@ -320,6 +302,25 @@ def masked_per_sample_mse(prediction: torch.Tensor, target: torch.Tensor,
         mask.flatten(1).sum(1).clamp_min(1.0) * prediction.shape[1])
 
 
+def bucket_keys_for_batch(batch: dict, batch_size: int) -> list[str]:
+    bucket = batch.get("bucket")
+    if bucket is None:
+        return ["unknown"] * batch_size
+    if isinstance(bucket, torch.Tensor):
+        value = bucket.detach().cpu()
+        if value.ndim == 1 and value.numel() >= 2:
+            width, height = int(value[0]), int(value[1])
+            return [f"{width}x{height}"] * batch_size
+        rows = value.reshape(-1, value.shape[-1])
+        keys = [f"{int(row[0])}x{int(row[1])}" for row in rows[:batch_size]]
+        return keys + [keys[-1] if keys else "unknown"] * (batch_size - len(keys))
+    values = list(bucket)
+    if len(values) >= 2 and all(isinstance(v, (int, float)) for v in values[:2]):
+        return [f"{int(values[0])}x{int(values[1])}"] * batch_size
+    keys = [f"{int(pair[0])}x{int(pair[1])}" for pair in values[:batch_size]]
+    return keys + [keys[-1] if keys else "unknown"] * (batch_size - len(keys))
+
+
 @torch.no_grad()
 def heldout_diffusion_loss(state, cfg, encoder) -> float | None:
     """Compute masked denoising MSE on the configured held-out parquet split."""
@@ -328,6 +329,8 @@ def heldout_diffusion_loss(state, cfg, encoder) -> float | None:
     was_training = state.unet.training
     state.unet.eval()
     per_sample_losses = []
+    bucket_sums: dict[str, float] = {}
+    bucket_counts: dict[str, int] = {}
     sample_count = 0
     generator = torch.Generator(device=state.device).manual_seed(cfg.val_seed)
     timestep_grid = fixed_validation_timesteps(
@@ -385,8 +388,13 @@ def heldout_diffusion_loss(state, cfg, encoder) -> float | None:
                         encoder_hidden_states=context.to(dtype=state.unet_dtype),
                         resolution_condition=resolution_condition,
                     ).sample
-                    per_sample_losses.extend(masked_per_sample_mse(
-                        prediction, noise, image_mask).detach().cpu().tolist())
+                    losses = masked_per_sample_mse(
+                        prediction, noise, image_mask).detach().cpu().tolist()
+                    per_sample_losses.extend(losses)
+                for key, loss_value in zip(
+                        bucket_keys_for_batch(batch, batch_size), losses):
+                    bucket_sums[key] = bucket_sums.get(key, 0.0) + float(loss_value)
+                    bucket_counts[key] = bucket_counts.get(key, 0) + 1
                 sample_count += batch_size
     finally:
         state.unet.train(was_training)
@@ -397,7 +405,22 @@ def heldout_diffusion_loss(state, cfg, encoder) -> float | None:
             "LongCLIP held-out validation expected "
             f"{cfg.validation_max_samples} samples but received {sample_count}; "
             "refusing a timestep-skewed metric")
-    return float(sum(per_sample_losses) / sample_count)
+    global_loss = float(sum(per_sample_losses) / sample_count)
+    bucket_summary = {
+        key: {
+            "count": bucket_counts[key],
+            "mean_loss": bucket_sums[key] / max(bucket_counts[key], 1),
+        }
+        for key in sorted(bucket_counts)
+    }
+    state.longclip_validation_bucket_summary = {
+        "global_loss": global_loss,
+        "sample_count": sample_count,
+        "buckets": bucket_summary,
+    }
+    print("LongCLIP held-out per-bucket losses: "
+          f"{json.dumps(bucket_summary, sort_keys=True)}")
+    return global_loss
 
 
 @torch.no_grad()
@@ -518,8 +541,12 @@ def main():
         state.unet, sara_summary, initial_sparse_values)
     baseline = capture_sara_selected_values(state.unet)
     sidecar_summary = install_longclip_sidecars(state, cfg)
-    sidecar_smoke = sidecar_identity_smoke(
-        state, cfg, smoke_output, smoke_context, smoke_latent, smoke_timestep)
+    initial_sidecar_loaded = load_initial_sidecar_state_after_install(state, encoder)
+    if initial_sidecar_loaded is None:
+        sidecar_smoke = sidecar_identity_smoke(
+            state, cfg, smoke_output, smoke_context, smoke_latent, smoke_timestep)
+    else:
+        sidecar_smoke = {"skipped": "initial_sidecar_state_loaded"}
     hooks = install_sara_gradient_masks(state.unet)
     trainable = [p for p in state.unet.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=cfg.sara_lr,
@@ -529,6 +556,9 @@ def main():
     state.vae.eval()
 
     baseline_validation_loss = heldout_diffusion_loss(state, cfg, encoder)
+    baseline_bucket_summary = (
+        getattr(state, "longclip_validation_bucket_summary", None)
+        if baseline_validation_loss is not None else None)
     if baseline_validation_loss is not None:
         print(
             "LongCLIP frozen-U-Net held-out baseline: "
@@ -645,6 +675,9 @@ def main():
     if step <= 0:
         raise RuntimeError("LongCLIP SaRA completed zero optimizer steps")
     final_validation_loss = heldout_diffusion_loss(state, cfg, encoder)
+    final_bucket_summary = (
+        getattr(state, "longclip_validation_bucket_summary", None)
+        if final_validation_loss is not None else None)
     validation_relative_change = None
     if baseline_validation_loss is not None:
         validation_relative_change = (
@@ -683,6 +716,8 @@ def main():
     validation_summary = {
         "baseline_loss": baseline_validation_loss,
         "final_loss": final_validation_loss,
+        "baseline_bucket_summary": baseline_bucket_summary,
+        "final_bucket_summary": final_bucket_summary,
         "relative_change": validation_relative_change,
         "max_relative_regression": cfg.validation_max_relative_regression,
         "short_prompt_relative_rms": short_prompt_relative_rms,
@@ -697,6 +732,7 @@ def main():
             if cfg.resolution_conditioning_enabled else None),
         "p4_state_dict": p4_state_dict(state.unet) if cfg.p4_enabled else None,
         "sidecar_summary": sidecar_summary,
+        "initial_sidecar_loaded": initial_sidecar_loaded,
         "sidecar_smoke": sidecar_smoke,
         "sara_sparse_summary": sara_summary,
         "sara_selected_delta": delta,
