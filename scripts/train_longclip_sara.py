@@ -514,6 +514,23 @@ def main():
                     break
             if step >= cfg.max_opt_steps:
                 break
+        if accumulation > 0 and step < cfg.max_opt_steps:
+            scale = cfg.gradient_accumulation_steps / accumulation
+            if scale != 1.0:
+                for param in trainable:
+                    if param.grad is not None:
+                        param.grad.mul_(scale)
+            torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip_norm)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            step += 1
+            print(
+                "longclip_sara final partial accumulation step "
+                f"{step}: flushed {accumulation}/"
+                f"{cfg.gradient_accumulation_steps} accumulated mini-batches")
+            accumulation = 0
     finally:
         remove_sara_gradient_masks(hooks)
 
