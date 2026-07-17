@@ -1,0 +1,101 @@
+{
+  "sd_checkpoint": "/mnt/e/stable-diffusion-webui/models/Stable-diffusion/stylejourney_v10.safetensors",
+  "longclip_repo": "/tmp/Long-CLIP",
+  "longclip_checkpoint": "/tmp/longclip-checkpoints/longclip-L.pt",
+  "output_dir": "./output_longclip_sara_15pct_plus_monet_from_3epoch",
+  "data_sources": [
+    {
+      "name": "unsplash-lite-gemma-captions-train",
+      "path": "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/train.parquet",
+      "prompt_source_fields": [
+        "training_caption",
+        "caption_detailed",
+        "caption_long",
+        "long_caption",
+        "prompt",
+        "caption",
+        "text"
+      ],
+      "prompt_source_mode": "first"
+    },
+    {
+      "name": "monet-cc12m-first-shard",
+      "path": "/mnt/d/data/monet/v1.2.0/cc12m/0-0/000000.tar",
+      "prompt_source_fields": [
+        "caption_florence-2-large",
+        "caption_internvl-3-8b",
+        "caption_sharegpt4v-7b",
+        "caption_gemini-2.5-flash-lite",
+        "caption_gemini_2_5_flash_lite"
+      ],
+      "prompt_source_mode": "random"
+    }
+  ],
+  "validation_data_sources": [
+    {
+      "name": "unsplash-lite-gemma-captions-validation",
+      "path": "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/validation.parquet",
+      "prompt_source_fields": [
+        "training_caption",
+        "caption_detailed",
+        "caption_long",
+        "long_caption",
+        "prompt",
+        "caption",
+        "text"
+      ],
+      "prompt_source_mode": "first"
+    }
+  ],
+  "run_mode": "full_train",
+  "context_tokens": 248,
+  "fail_on_prompt_truncation": false,
+  "mixed_precision": "bf16",
+  "train_batch_size": 4,
+  "gradient_accumulation_steps": 2,
+  "max_samples": 21637,
+  "epochs": 1,
+  "max_opt_steps": 2704,
+  "sara_lr": 1e-05,
+  "lr_warmup_steps": 100,
+  "lr_decay_steps": 2704,
+  "sara_selection_mode": "target_fraction",
+  "sara_target_fraction": 0.15,
+  "sara_min_sparse_fraction": 0.01,
+  "sara_max_sparse_fraction_warn": 0.2,
+  "sara_max_sparse_fraction_abort": 0.25,
+  "caption_mix_short": 0.25,
+  "caption_mix_medium": 0.25,
+  "caption_mix_long": 0.5,
+  "validation_every_opt_steps": 250,
+  "validation_max_samples": 64,
+  "require_validation_gate": true,
+  "validation_max_relative_regression": 0.02,
+  "require_short_prompt_regression_gate": true,
+  "short_prompt_max_relative_rms": 0.05,
+  "run_final_visual_check": true,
+  "wandb_enabled": false,
+  "generation_grid_every_opt_steps": 500,
+  "initial_sara_patch": "output_longclip_sara_3x_3epoch_from_5pct/longclip_sara_unet_attn2_kv_sparse.pt",
+  "prompt_source_fields": [
+    "training_caption",
+    "caption_detailed",
+    "caption_long",
+    "long_caption",
+    "prompt",
+    "caption",
+    "text"
+  ],
+  "prompt_source_mode": "first",
+  "validation_prompt_source_fields": [
+    "training_caption",
+    "caption_detailed",
+    "caption_long",
+    "long_caption",
+    "prompt",
+    "caption",
+    "text"
+  ],
+  "validation_prompt_source_mode": "first",
+  "wandb_run_name": "longclip-sara-15pct-plus-monet-from-3epoch"
+}

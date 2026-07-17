@@ -90,7 +90,10 @@ def main():
         max_samples=args.max_samples, batch_size=cfg.train_batch_size,
         shuffle=False, shuffle_buffer=1, base_seed=cfg.base_seed,
         buckets=cfg.aspect_ratio_buckets, drop_last=False,
-        max_image_dimension=cfg.max_image_dimension)
+        max_image_dimension=cfg.max_image_dimension,
+        prompt_source_fields=(
+            cfg.validation_prompt_source_fields or cfg.prompt_source_fields),
+        prompt_source_mode=cfg.validation_prompt_source_mode)
     differences = []
     suffix_differences = []
     with torch.no_grad():

@@ -148,10 +148,20 @@ class TrainConfig:
     train_batch_size: int = 4
     shuffle_buffer: int = 10000
     grad_clip_norm: float = 0.5
-    data_sources: List[str] = field(default_factory=lambda: [
+    data_sources: List[Any] = field(default_factory=lambda: [
         "jackyhate/text-to-image-2M",
     ])
-    validation_data_sources: List[str] = field(default_factory=list)
+    validation_data_sources: List[Any] = field(default_factory=list)
+    prompt_source_fields: List[str] = field(default_factory=lambda: [
+        "training_caption", "caption_detailed", "caption_long", "long_caption",
+        "caption_florence-2-large", "caption_internvl-3-8b",
+        "caption_sharegpt4v-7b", "caption_gemini-2.5-flash-lite",
+        "caption_gemini_2_5_flash_lite", "caption_original",
+        "prompt", "caption", "text",
+    ])
+    prompt_source_mode: Literal["random", "first"] = "random"
+    validation_prompt_source_fields: List[str] = field(default_factory=list)  # empty = prompt_source_fields
+    validation_prompt_source_mode: Literal["random", "first"] = "first"
     max_image_dimension: int = 1024
     aspect_ratio_buckets: List[List[int]] = field(default_factory=lambda: [
         [1024, 1024], [1024, 896], [1024, 768], [1024, 640], [1024, 512],

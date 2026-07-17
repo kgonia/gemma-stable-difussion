@@ -34,7 +34,8 @@ from pure_ella.longclip_sara import (
 from pure_ella.sara import (
     build_sara_attn2_kv_sparse_masks, capture_sara_selected_values,
     collect_sara_sparse_values, install_sara_gradient_masks,
-    remove_sara_gradient_masks, sara_selected_delta_metrics,
+    load_sara_sparse_values, remove_sara_gradient_masks,
+    sara_selected_delta_metrics,
 )
 from train import (
     TrainingState, _as_prompt_list, camera_conditioned_unet, masked_mse,
@@ -52,6 +53,115 @@ def lr_scheduler(optimizer, cfg):
         return max(0.0, 1.0 - (step - cfg.lr_warmup_steps) / max(
             1, cfg.lr_decay_steps - cfg.lr_warmup_steps))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
+
+
+def load_initial_sara_patch(state, cfg, encoder) -> dict | None:
+    """Load a completed previous LongCLIP SaRA patch before continuing."""
+    if not cfg.initial_sara_patch:
+        return None
+    path = Path(cfg.initial_sara_patch).expanduser()
+    patch = torch.load(path, map_location="cpu", weights_only=True)
+    expected = longclip_sara_schema(cfg, encoder)
+    actual = patch.get("longclip_sara_schema")
+    comparable_keys = (
+        "version", "conditioning_backend", "longclip", "sd_checkpoint",
+        "sd_checkpoint_sha256", "sara_target_substrings",
+        "sara_selection_mode",
+    )
+    if not isinstance(actual, dict) or any(
+            actual.get(key) != expected.get(key) for key in comparable_keys):
+        raise RuntimeError(
+            f"Initial LongCLIP SaRA patch provenance mismatch: {path}")
+    completion = patch.get("completion")
+    if (not isinstance(completion, dict)
+            or completion.get("completed") is not True
+            or completion.get("optimizer_steps", 0) <= 0):
+        raise RuntimeError(f"Initial LongCLIP SaRA patch is incomplete: {path}")
+    gate = patch.get("validation_gate")
+    if (cfg.require_validation_gate or cfg.require_short_prompt_regression_gate):
+        if not isinstance(gate, dict) or gate.get("passed") is not True:
+            raise RuntimeError(
+                f"Initial LongCLIP SaRA patch did not pass gates: {path}")
+    sparse_values = patch.get("sparse_values")
+    if not sparse_values:
+        raise RuntimeError(f"Initial LongCLIP SaRA patch has no sparse values: {path}")
+    loaded = load_sara_sparse_values(state.unet, sparse_values)
+    print(f"Initial LongCLIP SaRA endpoint loaded from {path}: {loaded:,} values")
+    return sparse_values
+
+
+def force_include_initial_sara_masks(unet, summary: dict, initial_sparse_values: dict | None) -> dict:
+    """Keep previous endpoint values in the new sparse mask without growing it."""
+    if not initial_sparse_values:
+        return summary
+    named = dict(unet.named_parameters())
+    missing_refs = []
+    removable_refs = []
+    for name, pack in initial_sparse_values.items():
+        p = named[name]
+        current = getattr(p, "_sara_sparse_mask", None)
+        if current is None:
+            raise RuntimeError(f"No new SaRA mask for initial patch parameter {name}")
+        previous = pack["mask"].to(device=p.device, dtype=torch.bool)
+        missing = previous & ~current
+        if missing.any():
+            missing_refs.append((name, missing))
+        removable = current & ~previous
+        if removable.any():
+            magnitudes = p.detach().abs()[removable].float().cpu()
+            removable_refs.extend(
+                (float(value), name, int(index))
+                for value, index in zip(magnitudes, torch.nonzero(removable.reshape(-1), as_tuple=False)[:, 0].cpu())
+            )
+    missing_count = sum(int(mask.sum().item()) for _, mask in missing_refs)
+    if not missing_count:
+        print("Initial SaRA mask already fully contained in new sparse selection")
+        return summary
+    if len(removable_refs) < missing_count:
+        raise RuntimeError(
+            "Cannot force-include initial SaRA mask while preserving sparse count")
+    removable_refs.sort(reverse=True)
+    by_name = {name: getattr(p, "_sara_sparse_mask", None) for name, p in named.items()}
+    for _, name, flat_index in removable_refs[:missing_count]:
+        mask = by_name[name]
+        if mask is None:
+            raise RuntimeError(f"No new SaRA mask for removable entry {name}")
+        mask.reshape(-1)[flat_index] = False
+    for name, missing in missing_refs:
+        mask = by_name[name]
+        if mask is None:
+            raise RuntimeError(f"No new SaRA mask for initial entry {name}")
+        mask.logical_or_(missing)
+
+    rows = []
+    selected = 0
+    total_target = 0
+    total_unet = sum(p.numel() for p in unet.parameters())
+    for row in summary["rows"]:
+        p = named[row["name"]]
+        mask = getattr(p, "_sara_sparse_mask")
+        count = int(mask.sum().item())
+        total = int(p.numel())
+        selected += count
+        total_target += total
+        p.requires_grad_(count > 0)
+        rows.append({**row, "selected": count, "fraction": count / max(total, 1)})
+    updated = {
+        **summary,
+        "selected": selected,
+        "total_target": total_target,
+        "fraction": selected / max(total_target, 1),
+        "total_unet": total_unet,
+        "target_scope_fraction": total_target / max(total_unet, 1),
+        "whole_unet_fraction": selected / max(total_unet, 1),
+        "rows": rows,
+        "initial_sara_forced_included": missing_count,
+    }
+    print(
+        "Initial SaRA endpoint mask forced into expanded selection: "
+        f"{missing_count:,} entries swapped; selected={selected:,} "
+        f"({updated['fraction']:.4%})")
+    return updated
 
 
 def save_visual_check(state, cfg):
@@ -108,14 +218,27 @@ def fixed_validation_timesteps(total: int, num_train_timesteps: int,
         device=device, dtype=torch.float64).round().long()
 
 
+def masked_per_sample_mse(prediction: torch.Tensor, target: torch.Tensor,
+                          image_mask: torch.Tensor | None) -> torch.Tensor:
+    """Return one padding-aware MSE per image, independent of batch grouping."""
+    error = (prediction.float() - target.float()).square()
+    if image_mask is None:
+        return error.flatten(1).mean(1)
+    mask = torch.nn.functional.interpolate(
+        image_mask.float(), size=prediction.shape[-2:], mode="nearest"
+    ).to(device=prediction.device, dtype=error.dtype)
+    return (error * mask).flatten(1).sum(1) / (
+        mask.flatten(1).sum(1).clamp_min(1.0) * prediction.shape[1])
+
+
 @torch.no_grad()
-def heldout_diffusion_loss(state, cfg, encoder, opt_step: int) -> float | None:
+def heldout_diffusion_loss(state, cfg, encoder) -> float | None:
     """Compute masked denoising MSE on the configured held-out parquet split."""
     if validation_skip_reason(cfg) is not None:
         return None
     was_training = state.unet.training
     state.unet.eval()
-    weighted_loss = 0.0
+    per_sample_losses = []
     sample_count = 0
     generator = torch.Generator(device=state.device).manual_seed(cfg.val_seed)
     timestep_grid = fixed_validation_timesteps(
@@ -139,7 +262,10 @@ def heldout_diffusion_loss(state, cfg, encoder, opt_step: int) -> float | None:
                 batch_size=cfg.train_batch_size, shuffle=False, shuffle_buffer=1,
                 base_seed=cfg.base_seed,
                 buckets=cfg.aspect_ratio_buckets,
-                drop_last=False, max_image_dimension=cfg.max_image_dimension)
+                drop_last=False, max_image_dimension=cfg.max_image_dimension,
+                prompt_source_fields=(
+                    cfg.validation_prompt_source_fields or cfg.prompt_source_fields),
+                prompt_source_mode=cfg.validation_prompt_source_mode)
             for batch in loader:
                 captions = deterministic_validation_captions(batch)
                 batch_size = len(captions)
@@ -160,21 +286,57 @@ def heldout_diffusion_loss(state, cfg, encoder, opt_step: int) -> float | None:
                     raise RuntimeError(
                         "Held-out loader exceeded validation_max_samples")
                 noisy = state.scheduler.add_noise(latent, noise, timestep)
-                context, _ = encoder.encode(captions)
+                context, _ = encoder.encode(
+                    captions, track_truncation=False)
                 with model_autocast(state):
                     prediction = camera_conditioned_unet(
                         state.unet, noisy, timestep,
                         encoder_hidden_states=context.to(dtype=state.unet_dtype),
                     ).sample
-                    batch_loss = float(
-                        masked_mse(prediction, noise, image_mask).item())
-                weighted_loss += batch_loss * batch_size
+                    per_sample_losses.extend(masked_per_sample_mse(
+                        prediction, noise, image_mask).detach().cpu().tolist())
                 sample_count += batch_size
     finally:
         state.unet.train(was_training)
     if not sample_count:
         raise RuntimeError("LongCLIP held-out validation received zero batches")
-    return weighted_loss / sample_count
+    if sample_count != cfg.validation_max_samples:
+        raise RuntimeError(
+            "LongCLIP held-out validation expected "
+            f"{cfg.validation_max_samples} samples but received {sample_count}; "
+            "refusing a timestep-skewed metric")
+    return float(sum(per_sample_losses) / sample_count)
+
+
+@torch.no_grad()
+def short_prompt_prediction_signature(state, cfg, encoder) -> torch.Tensor:
+    """Deterministic U-Net predictions used to gate short-prompt drift."""
+    was_training = state.unet.training
+    state.unet.eval()
+    generator = torch.Generator(device=state.device).manual_seed(cfg.val_seed + 1)
+    prompts = list(cfg.val_prompts)
+    timesteps = fixed_validation_timesteps(
+        len(prompts), state.scheduler.config.num_train_timesteps, state.device)
+    latents = torch.randn(
+        (len(prompts), 4, 64, 64), generator=generator,
+        device=state.device, dtype=state.unet_dtype)
+    try:
+        context, _ = encoder.encode(prompts, track_truncation=False)
+        with model_autocast(state):
+            prediction = camera_conditioned_unet(
+                state.unet, latents, timesteps,
+                encoder_hidden_states=context.to(dtype=state.unet_dtype),
+            ).sample
+        return prediction.detach().float().cpu()
+    finally:
+        state.unet.train(was_training)
+
+
+def relative_prediction_rms(current: torch.Tensor,
+                            baseline: torch.Tensor) -> float:
+    delta_rms = (current - baseline).square().mean().sqrt()
+    baseline_rms = baseline.square().mean().sqrt().clamp_min(1e-8)
+    return float((delta_rms / baseline_rms).item())
 
 
 @torch.no_grad()
@@ -218,6 +380,9 @@ def main():
         reason = validation_skip_reason(cfg)
         if reason is not None:
             print(f"LongCLIP held-out validation disabled: {reason}")
+            if cfg.require_validation_gate:
+                raise ValueError(
+                    f"LongCLIP validation gate is required but disabled: {reason}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     state = TrainingState(
@@ -229,7 +394,11 @@ def main():
     encoder = LongClipEncoder(
         cfg.longclip_repo, cfg.longclip_checkpoint, device, state.unet_dtype,
         cfg.fail_on_prompt_truncation)
-    state.encode_clip = encoder.encode
+    initial_sparse_values = load_initial_sara_patch(state, cfg, encoder)
+    # Diagnostic/visual calls are evaluation, so they must never mutate the
+    # training-only truncation counter.
+    state.encode_clip = lambda prompts: encoder.encode(
+        prompts, track_truncation=False)
 
     # Smoke-test the exact condition shape accepted by SD cross-attention.
     with torch.no_grad():
@@ -249,6 +418,8 @@ def main():
         max_sparse_fraction_warn=cfg.sara_max_sparse_fraction_warn,
         max_sparse_fraction_abort=cfg.sara_max_sparse_fraction_abort,
         target_substrings=cfg.sara_target_substrings)
+    sara_summary = force_include_initial_sara_masks(
+        state.unet, sara_summary, initial_sparse_values)
     baseline = capture_sara_selected_values(state.unet)
     hooks = install_sara_gradient_masks(state.unet)
     trainable = [p for p in state.unet.parameters() if p.requires_grad]
@@ -257,6 +428,18 @@ def main():
     scheduler = lr_scheduler(optimizer, cfg)
     state.unet.train()
     state.vae.eval()
+
+    baseline_validation_loss = heldout_diffusion_loss(state, cfg, encoder)
+    if baseline_validation_loss is not None:
+        print(
+            "LongCLIP frozen-U-Net held-out baseline: "
+            f"loss={baseline_validation_loss:.6f}")
+        if wandb is not None:
+            wandb.log({"longclip_sara_val/baseline_loss": baseline_validation_loss},
+                      step=0)
+    short_prompt_baseline = (
+        short_prompt_prediction_signature(state, cfg, encoder)
+        if cfg.require_short_prompt_regression_gate else None)
 
     step = 0
     accumulation = 0
@@ -270,7 +453,9 @@ def main():
                 shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
                 buckets=cfg.aspect_ratio_buckets,
                 drop_last=cfg.drop_last_bucket_batches,
-                max_image_dimension=cfg.max_image_dimension)
+                max_image_dimension=cfg.max_image_dimension,
+                prompt_source_fields=cfg.prompt_source_fields,
+                prompt_source_mode=cfg.prompt_source_mode)
             for batch in tqdm(loader, desc=f"LongCLIP+SaRA {epoch + 1}/{cfg.epochs}"):
                 captions = select_training_captions(batch, state)
                 image = batch["image"].to(device=device, dtype=state.unet_dtype)
@@ -317,7 +502,7 @@ def main():
                     }, step=step)
                 if (cfg.validation_every_opt_steps
                         and step % cfg.validation_every_opt_steps == 0):
-                    val_loss = heldout_diffusion_loss(state, cfg, encoder, step)
+                    val_loss = heldout_diffusion_loss(state, cfg, encoder)
                     if val_loss is not None:
                         print(f"longclip_sara validation step {step}: loss={val_loss:.6f}")
                         if wandb is not None:
@@ -334,12 +519,60 @@ def main():
 
     if step <= 0:
         raise RuntimeError("LongCLIP SaRA completed zero optimizer steps")
+    final_validation_loss = heldout_diffusion_loss(state, cfg, encoder)
+    validation_relative_change = None
+    if baseline_validation_loss is not None:
+        validation_relative_change = (
+            final_validation_loss - baseline_validation_loss
+        ) / max(baseline_validation_loss, 1e-12)
+        allowed = baseline_validation_loss * (
+            1.0 + cfg.validation_max_relative_regression)
+        print(
+            f"LongCLIP final held-out loss={final_validation_loss:.6f} "
+            f"baseline={baseline_validation_loss:.6f} "
+            f"relative_change={validation_relative_change:+.4%} "
+            f"allowed_max={allowed:.6f}")
+        if final_validation_loss > allowed:
+            raise RuntimeError(
+                "LongCLIP final validation gate failed: "
+                f"loss {final_validation_loss:.6f} exceeds {allowed:.6f}")
+    elif cfg.require_validation_gate:
+        raise RuntimeError("Required LongCLIP final validation did not run")
+
+    short_prompt_relative_rms = None
+    if short_prompt_baseline is not None:
+        short_prompt_final = short_prompt_prediction_signature(state, cfg, encoder)
+        short_prompt_relative_rms = relative_prediction_rms(
+            short_prompt_final, short_prompt_baseline)
+        print(
+            "LongCLIP short-prompt prediction drift: "
+            f"relative_rms={short_prompt_relative_rms:.6f} "
+            f"limit={cfg.short_prompt_max_relative_rms:.6f}")
+        if short_prompt_relative_rms > cfg.short_prompt_max_relative_rms:
+            raise RuntimeError(
+                "LongCLIP short-prompt regression gate failed: "
+                f"relative RMS {short_prompt_relative_rms:.6f} exceeds "
+                f"{cfg.short_prompt_max_relative_rms:.6f}")
+
     delta = sara_selected_delta_metrics(state.unet, baseline)
+    validation_summary = {
+        "baseline_loss": baseline_validation_loss,
+        "final_loss": final_validation_loss,
+        "relative_change": validation_relative_change,
+        "max_relative_regression": cfg.validation_max_relative_regression,
+        "short_prompt_relative_rms": short_prompt_relative_rms,
+        "short_prompt_max_relative_rms": cfg.short_prompt_max_relative_rms,
+        "passed": True,
+    }
     artifact = {
         "longclip_sara_schema": longclip_sara_schema(cfg, encoder),
         "sparse_values": collect_sara_sparse_values(state.unet),
         "sara_sparse_summary": sara_summary,
         "sara_selected_delta": delta,
+        "validation_gate": validation_summary,
+        "training_summary": {
+            "truncated_training_prompts": encoder.truncated_prompt_count,
+        },
         "completion": {"completed": True, "optimizer_steps": step},
         "run_config": cfg.to_dict(),
     }
@@ -352,11 +585,16 @@ def main():
           f"truncated training prompts={encoder.truncated_prompt_count}")
     save_visual_check(state, cfg)
     if wandb is not None:
-        wandb.log({
+        final_metrics = {
             "final/optimizer_steps": step,
             "final/selected_delta_relative_l2": delta["selected_delta_relative_l2"],
             "final/truncated_training_prompts": encoder.truncated_prompt_count,
-        })
+            "final/validation_loss": final_validation_loss,
+            "final/validation_relative_change": validation_relative_change,
+            "final/short_prompt_relative_rms": short_prompt_relative_rms,
+        }
+        wandb.log({key: value for key, value in final_metrics.items()
+                   if value is not None})
         wandb.finish()
 
 

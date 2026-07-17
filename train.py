@@ -1021,7 +1021,9 @@ def run_clip_pretrain(state: TrainingState):
                 shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
                 buckets=cfg.aspect_ratio_buckets,
                 drop_last=cfg.drop_last_bucket_batches,
-                max_image_dimension=cfg.max_image_dimension)
+                max_image_dimension=cfg.max_image_dimension,
+                prompt_source_fields=cfg.prompt_source_fields,
+                prompt_source_mode=cfg.prompt_source_mode)
         progress = tqdm(dl, desc=f"CLIP-pretrain {epoch+1}/{cfg.pretrain_epochs}")
         for batch in progress:
             if prompt_only:
@@ -1538,6 +1540,8 @@ def run_diffusion_training_loop(
             buckets=cfg.aspect_ratio_buckets,
             drop_last=cfg.drop_last_bucket_batches,
             max_image_dimension=cfg.max_image_dimension,
+            prompt_source_fields=cfg.prompt_source_fields,
+            prompt_source_mode=cfg.prompt_source_mode,
         )
         progress = tqdm(
             dataloader,
@@ -2633,7 +2637,9 @@ def main():
             shuffle_buffer=cfg.shuffle_buffer, base_seed=cfg.base_seed,
             buckets=cfg.aspect_ratio_buckets,
             drop_last=False,
-            max_image_dimension=cfg.max_image_dimension)
+            max_image_dimension=cfg.max_image_dimension,
+            prompt_source_fields=cfg.prompt_source_fields,
+            prompt_source_mode=cfg.prompt_source_mode)
         batch = next(iter(dl))
         state.overfit_eval_batch = {
             "image": batch["image"],

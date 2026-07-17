@@ -56,8 +56,8 @@ class LongClipSaraConfig:
     longclip_repo: str
     longclip_checkpoint: str
     output_dir: str
-    data_sources: list[str]
-    validation_data_sources: list[str] = field(default_factory=list)
+    data_sources: list[Any]
+    validation_data_sources: list[Any] = field(default_factory=list)
     run_mode: Literal["short_train", "full_train"] = "full_train"
     context_tokens: int = LONGCLIP_L_CONTEXT_TOKENS
     longclip_width: int = LONGCLIP_L_WIDTH
@@ -76,6 +76,11 @@ class LongClipSaraConfig:
     grad_clip_norm: float = 0.5
     shuffle_streaming: bool = True
     shuffle_buffer: int = 10000
+    prompt_source_fields: list[str] = field(
+        default_factory=lambda: TrainConfig().prompt_source_fields)
+    prompt_source_mode: Literal["random", "first"] = "random"
+    validation_prompt_source_fields: list[str] = field(default_factory=list)
+    validation_prompt_source_mode: Literal["random", "first"] = "first"
     aspect_ratio_buckets: list[tuple[int, int]] = field(default_factory=lambda: [
         (1024, 1024), (1024, 896), (1024, 768), (1024, 640), (1024, 512),
         (896, 1024), (768, 1024), (640, 1024), (512, 1024),
@@ -94,6 +99,8 @@ class LongClipSaraConfig:
     sara_target_substrings: tuple[str, ...] = ("attn2.to_k", "attn2.to_v")
     validation_every_opt_steps: int = 250
     validation_max_samples: int = 64
+    require_validation_gate: bool = False
+    validation_max_relative_regression: float = 0.02
     generation_grid_every_opt_steps: int = 0
     base_seed: int = 1234
     val_steps: int = 30
@@ -104,6 +111,8 @@ class LongClipSaraConfig:
         "a watercolor painting of a mountain lake",
         "a neon-lit cyberpunk alleyway at night",
     ])
+    require_short_prompt_regression_gate: bool = True
+    short_prompt_max_relative_rms: float = 0.05
     complex_generation_cases: list[dict[str, Any]] = field(
         default_factory=lambda: TrainConfig().complex_generation_cases)
     run_final_visual_check: bool = True
@@ -111,6 +120,7 @@ class LongClipSaraConfig:
     wandb_project: str = "gemma3-sd-pure-ella"
     wandb_entity: str = ""
     wandb_run_name: str = ""
+    initial_sara_patch: str = ""
 
     def __post_init__(self):
         if self.context_tokens != LONGCLIP_L_CONTEXT_TOKENS:
@@ -127,8 +137,20 @@ class LongClipSaraConfig:
             raise ValueError("LongCLIP SaRA needs positive data and step budgets")
         if self.validation_max_samples < 0:
             raise ValueError("validation_max_samples must be non-negative")
+        if self.validation_max_relative_regression < 0:
+            raise ValueError("validation_max_relative_regression must be non-negative")
+        if self.short_prompt_max_relative_rms < 0:
+            raise ValueError("short_prompt_max_relative_rms must be non-negative")
+        if self.require_short_prompt_regression_gate and not self.val_prompts:
+            raise ValueError("short-prompt regression gate requires val_prompts")
         if self.mixed_precision not in {"no", "bf16"}:
             raise ValueError("mixed_precision must be 'no' or 'bf16'")
+        if self.prompt_source_mode not in {"random", "first"}:
+            raise ValueError("prompt_source_mode must be 'random' or 'first'")
+        if self.validation_prompt_source_mode not in {"random", "first"}:
+            raise ValueError("validation_prompt_source_mode must be 'random' or 'first'")
+        if not self.prompt_source_fields:
+            raise ValueError("prompt_source_fields must not be empty")
         if self.model_weight_dtype != "float32":
             raise ValueError("SaRA training requires float32 master weights")
         if self.sara_selection_mode not in {"magnitude_threshold", "target_fraction"}:
@@ -182,7 +204,8 @@ class LongClipEncoder:
         self.truncated_prompt_count = 0
 
     @torch.no_grad()
-    def encode(self, prompts) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, prompts, *, track_truncation: bool = True,
+               ) -> tuple[torch.Tensor, torch.Tensor]:
         prompts = [prompts] if isinstance(prompts, str) else list(prompts)
         # First attempt the strict path.  For corpus training, callers may
         # explicitly permit clipping; in that case count it instead of hiding
@@ -206,8 +229,9 @@ class LongClipEncoder:
                     if not is_longclip_context_overflow(prompt_error):
                         raise
                     overlong += 1
-            self.truncated_prompt_count += overlong
-            if self.truncated_prompt_count == overlong:
+            if track_truncation:
+                self.truncated_prompt_count += overlong
+            if track_truncation and self.truncated_prompt_count == overlong:
                 print(
                     "WARNING: LongCLIP training truncation enabled; clipped "
                     f"{overlong}/{len(prompts)} prompt(s) to "
@@ -276,3 +300,8 @@ def validate_longclip_sara_checkpoint(
             f"LongCLIP SaRA checkpoint {source} is incomplete or has zero updates")
     if not checkpoint.get("sparse_values"):
         raise RuntimeError(f"LongCLIP SaRA checkpoint {source} has no sparse values")
+    gate = checkpoint.get("validation_gate")
+    if (cfg.require_validation_gate or cfg.require_short_prompt_regression_gate):
+        if not isinstance(gate, dict) or gate.get("passed") is not True:
+            raise RuntimeError(
+                f"LongCLIP SaRA checkpoint {source} did not pass validation gates")
