@@ -94,6 +94,7 @@ from pure_ella.resolution import (
     make_resolution_condition_from_latents,
 )
 from scripts.train_longclip_sara import (
+    bucket_keys_for_batch,
     fixed_validation_timesteps,
     heldout_diffusion_loss,
     masked_per_sample_mse as longclip_masked_per_sample_mse,
@@ -227,7 +228,11 @@ class ConnectorTrainingTests(unittest.TestCase):
         # fake from the deterministic test via a one-sample functional UNet.
         state.unet = SimpleNamespace(
             training=True, eval=lambda: None, train=lambda mode=True: None)
-        batch = {"caption": ["only one"], "image": torch.zeros(1, 4, 2, 2)}
+        batch = {
+            "caption": ["only one"],
+            "image": torch.zeros(1, 4, 2, 2),
+            "bucket": (512, 512),
+        }
         encoder = SimpleNamespace(encode=lambda captions, **kwargs: (
             torch.zeros(len(captions), 248, 768),
             torch.ones(len(captions), 248, dtype=torch.long)))
@@ -445,6 +450,42 @@ class ConnectorTrainingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing p4_state_dict"):
                 load_longclip_sara_checkpoint(
                     FakeUNet(), missing_p4, cfg, encoder, "missing")
+
+            gate_disabled_cfg = LongClipSaraConfig(
+                sd_checkpoint=str(sd_checkpoint), longclip_repo="repo",
+                longclip_checkpoint="model.pt", output_dir="output",
+                data_sources=["train.parquet"],
+                require_validation_gate=False,
+                require_short_prompt_regression_gate=False,
+            )
+            gate_disabled_checkpoint = {
+                "longclip_sara_schema": longclip_sara_schema(gate_disabled_cfg, encoder),
+                "sparse_values": checkpoint["sparse_values"],
+                "validation_gate": {"passed": False},
+                "completion": {"completed": True, "optimizer_steps": 1},
+                "run_config": gate_disabled_cfg.to_dict(),
+            }
+            load_longclip_sara_checkpoint(
+                FakeUNet(), gate_disabled_checkpoint, gate_disabled_cfg,
+                encoder, "gate-disabled")
+            with self.assertRaisesRegex(RuntimeError, "did not pass validation gates"):
+                load_longclip_sara_checkpoint(
+                    FakeUNet(), gate_disabled_checkpoint, gate_disabled_cfg,
+                    encoder, "gate-forced", require_validation_gate=True)
+
+    def test_bucket_keys_for_batch_requires_single_bucket_pair(self):
+        self.assertEqual(
+            bucket_keys_for_batch({"bucket": (640, 1024)}, 2),
+            ["640x1024", "640x1024"])
+        self.assertEqual(
+            bucket_keys_for_batch({"bucket": torch.tensor([512, 768])}, 1),
+            ["512x768"])
+        with self.assertRaisesRegex(ValueError, "missing emitted bucket"):
+            bucket_keys_for_batch({}, 1)
+        with self.assertRaisesRegex(ValueError, r"shape \[2\]"):
+            bucket_keys_for_batch({"bucket": torch.tensor([[512, 768]])}, 1)
+        with self.assertRaisesRegex(ValueError, r"single \(width, height\) pair"):
+            bucket_keys_for_batch({"bucket": [(512, 768), (640, 1024)]}, 2)
 
     def test_longclip_sara_schema_pins_encoder_and_sparse_selection(self):
         with tempfile.TemporaryDirectory() as directory:

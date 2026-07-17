@@ -105,6 +105,7 @@ class ResolutionConditioner(nn.Module):
         condition = condition.to(dtype=self.input.weight.dtype)
         return self.output(self.activation(self.input(condition)))
 
+
 def install_resolution_conditioner(unet, conditioner: ResolutionConditioner) -> None:
     if getattr(unet, "class_embedding", None) is not None:
         raise ValueError("UNet already has class conditioning; resolution branch conflicts")

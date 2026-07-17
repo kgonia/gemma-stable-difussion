@@ -340,6 +340,9 @@ def longclip_sara_schema(cfg: LongClipSaraConfig, encoder: LongClipEncoder) -> d
 def validate_longclip_sara_checkpoint(
     checkpoint: dict, cfg: LongClipSaraConfig, encoder: LongClipEncoder,
     source: str,
+    *,
+    require_validation_gate: bool | None = None,
+    require_short_prompt_regression_gate: bool | None = None,
 ) -> None:
     """Reject a sparse patch if its LongCLIP or SD provenance differs."""
     expected = longclip_sara_schema(cfg, encoder)
@@ -376,7 +379,14 @@ def validate_longclip_sara_checkpoint(
         raise RuntimeError(
             f"LongCLIP SaRA checkpoint {source} has unexpected p4_state_dict")
     gate = checkpoint.get("validation_gate")
-    if (cfg.require_validation_gate or cfg.require_short_prompt_regression_gate):
+    validation_gate_required = (
+        cfg.require_validation_gate
+        if require_validation_gate is None else require_validation_gate)
+    short_prompt_gate_required = (
+        cfg.require_short_prompt_regression_gate
+        if require_short_prompt_regression_gate is None
+        else require_short_prompt_regression_gate)
+    if validation_gate_required or short_prompt_gate_required:
         if not isinstance(gate, dict) or gate.get("passed") is not True:
             raise RuntimeError(
                 f"LongCLIP SaRA checkpoint {source} did not pass validation gates")
@@ -440,9 +450,9 @@ def load_longclip_sara_sidecar_state(unet, checkpoint: dict, cfg: LongClipSaraCo
                                      source: str) -> dict[str, int]:
     """Strictly load resolution/P4 sidecar state into already-installed modules."""
     loaded = {"resolution_tensors": 0, "p4_tensors": 0}
+    install_longclip_sara_sidecars(unet, cfg)
     if cfg.resolution_conditioning_enabled:
         from pure_ella.resolution import ResolutionConditioner
-        install_longclip_sara_sidecars(unet, cfg)
         conditioner = getattr(unet, "class_embedding", None)
         if not isinstance(conditioner, ResolutionConditioner):
             raise RuntimeError(f"Resolution sidecar was not installed for {source}")
@@ -450,7 +460,6 @@ def load_longclip_sara_sidecar_state(unet, checkpoint: dict, cfg: LongClipSaraCo
         conditioner.load_state_dict(state_dict, strict=True)
         loaded["resolution_tensors"] = len(state_dict)
     if cfg.p4_enabled:
-        install_longclip_sara_sidecars(unet, cfg)
         blocks = getattr(unet, "p4_blocks", None)
         if blocks is None:
             raise RuntimeError(f"P4 sidecars were not installed for {source}")
@@ -469,9 +478,14 @@ def load_longclip_sara_checkpoint(
     *,
     load_sparse: bool = True,
     load_sidecars: bool = True,
+    require_validation_gate: bool | None = None,
+    require_short_prompt_regression_gate: bool | None = None,
 ) -> dict[str, Any]:
     """Validate and load a LongCLIP SaRA checkpoint without dropping sidecars."""
-    validate_longclip_sara_checkpoint(checkpoint, cfg, encoder, source)
+    validate_longclip_sara_checkpoint(
+        checkpoint, cfg, encoder, source,
+        require_validation_gate=require_validation_gate,
+        require_short_prompt_regression_gate=require_short_prompt_regression_gate)
     result: dict[str, Any] = {"sparse_values": 0, "sidecars": {}}
     if load_sidecars:
         result["sidecars"] = load_longclip_sara_sidecar_state(

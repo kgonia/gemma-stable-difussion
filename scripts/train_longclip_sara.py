@@ -135,7 +135,12 @@ def load_initial_sara_patch(state, cfg, encoder) -> dict | None:
                     f"Initial LongCLIP SaRA sidecar schema mismatch for {key}: {path}")
     loaded = load_longclip_sara_checkpoint(
         state.unet, patch, patch_cfg, encoder, str(path),
-        load_sparse=True, load_sidecars=False)
+        load_sparse=True, load_sidecars=False,
+        require_validation_gate=(
+            cfg.require_validation_gate or patch_cfg.require_validation_gate),
+        require_short_prompt_regression_gate=(
+            cfg.require_short_prompt_regression_gate
+            or patch_cfg.require_short_prompt_regression_gate))
     sparse_values = patch["sparse_values"]
     state.initial_longclip_sara_checkpoint = patch
     state.initial_longclip_sara_patch_cfg = patch_cfg
@@ -305,20 +310,17 @@ def masked_per_sample_mse(prediction: torch.Tensor, target: torch.Tensor,
 def bucket_keys_for_batch(batch: dict, batch_size: int) -> list[str]:
     bucket = batch.get("bucket")
     if bucket is None:
-        return ["unknown"] * batch_size
+        raise ValueError("validation batch is missing emitted bucket")
     if isinstance(bucket, torch.Tensor):
         value = bucket.detach().cpu()
-        if value.ndim == 1 and value.numel() >= 2:
+        if value.ndim == 1 and value.numel() == 2:
             width, height = int(value[0]), int(value[1])
             return [f"{width}x{height}"] * batch_size
-        rows = value.reshape(-1, value.shape[-1])
-        keys = [f"{int(row[0])}x{int(row[1])}" for row in rows[:batch_size]]
-        return keys + [keys[-1] if keys else "unknown"] * (batch_size - len(keys))
+        raise ValueError(f"validation bucket tensor must have shape [2], got {tuple(value.shape)}")
     values = list(bucket)
-    if len(values) >= 2 and all(isinstance(v, (int, float)) for v in values[:2]):
+    if len(values) == 2 and all(isinstance(v, (int, float)) for v in values):
         return [f"{int(values[0])}x{int(values[1])}"] * batch_size
-    keys = [f"{int(pair[0])}x{int(pair[1])}" for pair in values[:batch_size]]
-    return keys + [keys[-1] if keys else "unknown"] * (batch_size - len(keys))
+    raise ValueError(f"validation bucket must be a single (width, height) pair, got {bucket!r}")
 
 
 @torch.no_grad()
