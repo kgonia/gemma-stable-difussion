@@ -336,7 +336,18 @@ outputs/diffusion targets rather than CLIP embedding imitation alone.
   training remains blocked on the versioned offline manifest, trusted FOV label
   provenance, null-label controls, and camera/lens holdouts. Do not use the
   quarantined raw-focal config as evidence of physical FOV control.
-- **P4 U-Net/DiT capacity:** evidence-gated only after P1-P3.
+- **Resolution conditioning sidecar:** keep separate from P3 camera metadata and P4
+  capacity. First ablation should use only emitted-canvas `log2(width/1024)` and
+  `log2(height/1024)`; `log_aspect` and `log_area` are derived features reserved for
+  later ablations.
+- **P4 U-Net/DiT capacity:** evidence-gated only after P1-P3 / resolution-sidecar
+  baselines show remaining layout or long-prompt headroom. P4a is the mandatory no-PE
+  attribution control; P4b is the preferred serious design with axial 2D RoPE inside an
+  otherwise identical block. Use `y = x + tanh(g) * F(x)` with `g=0` exactly, make
+  `F(x)` a residual delta, do not zero-init the output projection or add internal zero
+  gates, and insert block 1 after `down_blocks[-1]` before `mid_block`. Smoke-test before
+  any full run: step-0 identity, nonzero gate gradient, gate movement off zero, branch
+  gradients after opening, and per-bucket preservation/composition telemetry.
 
 ## Reference points
 

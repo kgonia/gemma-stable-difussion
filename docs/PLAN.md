@@ -119,7 +119,8 @@ Four capability pillars, in dependency order:
    the text prompt (Metric3D v2 + FINO inspiration: the image is under-determined;
    metadata resolves the ambiguity).
 4. **P4 — DiT-ification (optional)**: extra transformer capacity in the UNet, inserted
-   as zero-gated blocks.
+   as exact-zero-gated residual-delta blocks, with axial 2D RoPE as the preferred
+   positional variant after a no-position control.
 
 **Guiding invariant** (already the house style — connector `extra_gate_init=-5.0`,
 recursive/TRM gates, SaRA near-zero weights): *every new capability enters through
@@ -301,18 +302,145 @@ guided-control metrics; metadata-free quality stays within the B0/P1 tolerance.
 Observational P3a/P3b results are reported as FOV-correlated control, not isolated
 physical control.
 
-## P4 — DiT-ification via zero-gated blocks (optional, last, ROI-gated)
+## Resolution conditioning sidecar (separate from P3 and P4)
+
+Width/height conditioning is a separate sidecar, not P3 camera metadata and not P4
+capacity. It declares the requested canvas geometry globally; RoPE/relative position in
+P4 instead describes relationships among spatial tokens. Keep these ablations separate
+so improvements remain attributable.
+
+Resolution-conditioner v1 uses only the two independent emitted-canvas features:
+
+```text
+log2(width / 1024)
+log2(height / 1024)
+```
+
+Use the bucket/canvas size actually emitted to the U-Net, not raw source image size.
+Do not include `log_aspect` or `log_area` in v1 because they are exact linear
+combinations of the two log-dimension features and may encourage nine-bucket
+memorization. Derived features are a later ablation only. The sidecar should have an
+unknown/dropout path and its own schema, checkpoint, validation grids, and on/off
+generation switch.
+
+## P4 — DiT-ification via exact-zero-gated blocks (optional, last, ROI-gated)
 
 Do **not** insert raw new transformer blocks into SD 1.5 — fresh blocks are maximally
-undertrained and directly contradict P2. If pursued:
+undertrained and directly contradict P2. P4 is allowed only as an identity-safe delta
+artifact when P1/P2/P3 or the resolution sidecar leave measurable long-prompt or layout
+headroom.
 
-- Insert blocks (extra self-attn depth in mid-block and lowest-resolution stages first —
-  cheapest, most semantic) wrapped in `tanh(α)·f(x)` with α=0 or a zero-init output
-  projection (Flamingo/ControlNet pattern). Identity at init, capacity opens on demand.
-- Train the gates + new blocks with the P2 knowledge-preservation metric as a hard gate.
-- **Go/no-go:** only start P4 if P1–P3 leave measurable headroom on long-prompt
-  compositional metrics that connector/SaRA scaling demonstrably cannot close. Otherwise
-  spend the compute on P2 increments and longer P1 training.
+### Identity and branch design
+
+Use exactly one identity mechanism, at the output of the whole new branch:
+
+```text
+y = x + tanh(g) * F(x), with g initialized exactly to 0
+```
+
+The exact-zero gate gives bit-exact baseline behavior at step 0 and still receives a
+gradient because `F(x)` is nonzero. Do **not** combine this with a zero-initialized
+output projection, an internal zero residual gate, or any modulation that zeros the
+branch output; that creates a gradient deadlock or an unnecessarily slow staged opening.
+The output projection and internal attention/FFN residuals must be nonzero-capable at
+initialization.
+
+`F(x)` should be a residual delta, not a learned remapping of the whole input stream:
+
+```text
+z0 = input_projection(x)
+delta_attn = self_attention(adaln_or_norm(z0))
+z1 = z0 + delta_attn
+delta_ffn = ffn(adaln_or_norm(z1))
+F(x) = output_projection(delta_attn + delta_ffn)
+```
+
+Equivalently, project `z_final - z0`. This prevents P4 from opening as a simple learned
+rescale/remix of `x`; the gated branch represents new computation.
+
+P4 should be timestep-aware using the existing SD timestep embedding, preferably through
+AdaLN/scale-shift inside the branch. Enforce the same one-zero rule there: use ordinary
+nonzero-capable attention/FFN branches. If scale/shift projections are zero-initialized,
+they must be formulated as standard transformer modulation (`normalized * (1 + scale) +
+shift`), not as an internal gate that zeros the branch.
+
+### Positional variants
+
+P4a is the mandatory attribution control: identical block, no explicit positional
+encoding. It tests capacity alone.
+
+P4b is the preferred serious P4 design: the same block and initialization, but Q/K
+self-attention uses axial 2D RoPE. This gives parameter-free relative spatial geometry
+native to every bucket shape, with no learned position table, no interpolation, no extra
+input channels, and no width/height-conditioning entanglement.
+
+RoPE contract:
+
+- require `head_dim % 4 == 0`;
+- split each attention head's Q/K dimensions equally between vertical and horizontal
+  axes, with rotary pairs inside each axis slice;
+- rotate Q and K only, never V;
+- generate integer feature coordinates `y = 0..H-1`, `x = 0..W-1` from the actual
+  feature map shape;
+- use row-major flattening with origin at the upper-left corner and record that
+  convention in the schema;
+- generate/cache sin/cos by `(H, W, device, dtype)`, computing frequencies in FP32 and
+  casting for attention;
+- record `rope_base` in the schema (`10000` is a reasonable initial control);
+- no learned relative-bias table and no absolute DiT-style sin/cos grid in P4b.
+
+Do not use the training `image_mask` as a P4 attention mask initially. It exists because
+training samples are padded, while pure text-to-image inference has no content mask;
+masking P4 attention would add another training/inference mismatch.
+
+### Insertion ladder for SD1.5
+
+Avoid ambiguous "lowest-resolution stage" language. In SD1.5, the deepest down-block and
+the mid-block operate at the same spatial resolution (for a 1024x640 bucket: 128x80
+latent -> 16x10 deepest grid). The sites differ architecturally, not by grid size.
+
+1. **P4 block 1:** after `down_blocks[-1]`, before `mid_block`. This is adjacent to
+   the existing mid-block transformer, improves the representation entering the existing
+   mid-block text/image processing, and is the friendliest first insertion site. Record
+   the exact module path in the schema and assert the observed feature shape at runtime.
+2. **P4 block 2, only if justified:** after `mid_block`, before the first up block, for
+   post-mid global refinement at the same spatial resolution.
+3. **Later only:** the next 32x20 level if same-resolution P4 passes preservation and
+   composition gates.
+
+### Ablation and gates
+
+The approved ladder is:
+
+1. Monet4 baseline.
+2. Resolution conditioner using the two independent log-dimension features.
+3. P4a: one external-zero-gated delta transformer, no positional encoding.
+4. P4b: identical non-RoPE initialization and training stream, axial 2D RoPE enabled.
+5. Second P4 insertion only if the first passes preservation and composition gates.
+6. P4b + resolution conditioner only after both individual effects are established.
+
+The resolution-conditioner arm and P4b arm are independent and may run in parallel
+against the same baseline if compute permits. P4a is an attribution control for P4b, not
+a prerequisite gate that P4b must wait on. For a credible RoPE comparison, P4a and P4b
+must use the same base checkpoint, same initialization seed for every non-RoPE parameter,
+same samples/order/timesteps/noise seeds/optimizer/budget, identical parameter counts,
+and the same frozen SaRA endpoint during the initial P4 comparison.
+
+Before any full-epoch arm, run the existing smoke pattern (`smoke_10`/`smoke_100` style)
+with telemetry on. Required smoke checks:
+
+- step-0 outputs are bit-identical to the baseline with the P4/resolution sidecar loaded;
+- P4 gate values move off zero;
+- gate gradients are nonzero at step 0;
+- branch parameter gradient norms become nonzero after the gate opens;
+- P2 knowledge-preservation metrics and per-bucket validation/contact sheets are logged.
+
+**Go/no-go:** only scale P4 if P1/P2/P3 and the resolution sidecar leave measurable
+headroom on long-prompt compositional or layout metrics that connector/SaRA scaling
+cannot close. If gates barely open after one epoch over the current 51k-image Monet4 mix,
+that is a capacity-vs-data finding, not automatically an implementation failure. For
+large-bucket coherence defects, also check the SD1.5 schedule/SNR confound before blaming
+positional encoding.
 
 ---
 
@@ -327,9 +455,9 @@ Phase 0 (fixes)  →  P1 finish (B0 checkpoint)  →  P2 increments (B1..Bn)
 ```
 
 Every milestone ships as a *delta artifact* (connector .pt, sparse patch, metadata-MLP
-.pt, gated-block .pt) applied to the same frozen StyleJourney UNet — so any combination
-can be composed or ablated by choosing which patches to load, extending the existing
-`run_reload_proof` pattern to a compositional proof.
+.pt, resolution-sidecar .pt, gated-block .pt) applied to the same frozen StyleJourney
+UNet — so any combination can be composed or ablated by choosing which patches to load,
+extending the existing `run_reload_proof` pattern to a compositional proof.
 
 ## Related directions considered
 
@@ -355,5 +483,7 @@ can be composed or ablated by choosing which patches to load, extending the exis
 | SaRA widening degrades short prompts | P2 | per-increment FID gate, instant rollback (delete patch) |
 | Pseudo-labels too noisy -> FOV signal ignored | P3 | keep them as a separate ablation against real, shuffled and constant-label controls |
 | Metadata leaks into text semantics (entanglement) | P3 | keep injection global (time-embed), not cross-attn, in v1 |
-| P4 gates open and drag frozen knowledge | P4 | knowledge-preservation hard gate; gate-value logging like `extra_gate_logit` |
+| Resolution conditioning memorizes buckets | resolution sidecar | v1 uses only log2(width/1024), log2(height/1024); derived features only in later ablations |
+| P4 gates open and drag frozen knowledge | P4 | exact-zero external gate, step-0 identity smoke, knowledge-preservation hard gate, gate and branch-gradient logging |
+| P4 positional result is training variance | P4 | paired P4a/P4b seeds, order, timesteps, noise, optimizer, budget, and frozen SaRA endpoint |
 | Compute budget (single GPU) | all | FP32 trainable weights + BF16 autocast; gradient checkpointing already on |
