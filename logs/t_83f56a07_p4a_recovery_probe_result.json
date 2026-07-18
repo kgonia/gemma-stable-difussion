@@ -1,0 +1,62 @@
+{
+  "task_id": "t_83f56a07",
+  "status": "passed",
+  "timestamp_completed": "2026-07-18T15:58:54+02:00",
+  "commit_under_test": "19410d7abd29be48b34e1cbea162dfa93104760e",
+  "config": {
+    "path": "config_longclip_sara_15pct_plus_monet4_resolution_p4a_recovery_probe_500.json",
+    "sha256": "0e480df686a4b6a9889e62144a8a517b7e10a0897e07482038e90b2370a2f108",
+    "max_samples": 4000,
+    "optimizer_steps": 500,
+    "sara_lr": 3e-06,
+    "sidecar_lr": 1e-05,
+    "lr_decay_steps": 6435,
+    "short_prompt_max_relative_rms": 0.05
+  },
+  "execution": {
+    "exit_code": 0,
+    "runtime_minutes": 30.6,
+    "gpu_uuid": "GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd",
+    "oom": false,
+    "tracebacks": 0,
+    "optimizer_groups": {
+      "sara_tensor_elements": 19169280,
+      "sidecar_parameters": 23289089
+    }
+  },
+  "validation_gate": {
+    "baseline_loss": 0.15145292160923418,
+    "final_loss": 0.15142711398402753,
+    "relative_change": -0.00017040031273374604,
+    "heldout_passed": true,
+    "short_prompt_relative_rms": 0.013411612249910831,
+    "short_prompt_limit": 0.05,
+    "short_prompt_passed": true,
+    "passed": true
+  },
+  "sara_selected_delta": {
+    "selected_delta_l2": 0.21623486572504647,
+    "selected_delta_relative_l2": 0.03252157085983728,
+    "selected_delta_rms": 0.0001275196731467763,
+    "selected_delta_max_abs": 0.001050332561135292
+  },
+  "p4_final_telemetry": {
+    "gate": 0.0005386345437727869,
+    "tanh_gate": 0.0005386344855651259,
+    "branch_rms": 0.16236136853694916,
+    "output_delta_rms": 0.00008732968126423657
+  },
+  "artifacts": {
+    "checkpoint": {
+      "path": "output_longclip_sara_15pct_plus_monet4_resolution_p4a_recovery_probe_500/longclip_sara_unet_attn2_kv_sparse.pt",
+      "size_bytes": 123872301,
+      "sha256": "7b3a0f314fbcaef972abb9f697c122d52c9166953a53fba0f7b42dfb3966ac17",
+      "strict_validation": "passed"
+    },
+    "log": {
+      "path": "logs/queued_longclip_resolution_p4a_recovery_probe_500.log",
+      "sha256": "9989a1a7e6176247ac80ac32e72d27f607f31640a9f7be7152b5864d9ec76fc6"
+    }
+  },
+  "verdict": "The split-LR recovery passes at 500 steps. This is a scale-up gate, not proof that 6435 steps will remain below 0.05; component ablation is required before full rerun."
+}
