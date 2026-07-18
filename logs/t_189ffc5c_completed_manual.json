@@ -1,0 +1,119 @@
+{
+  "task": {
+    "id": "t_189ffc5c",
+    "title": "GPU: LongCLIP resolution+P4b speed/VRAM probe",
+    "body": "GPU UUID: GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd\nCUDA device: cuda:0 via CUDA_VISIBLE_DEVICES=0\nLock: /tmp/hermes-gpu-0.lock\nRepository: /home/krz/PycharmProjects/gemma-stable-difussion\nGit commit: b7f45d317b4f46d4e6ebd8d914aa1c4cc0b6d0d6\nWorking directory: /home/krz/PycharmProjects/gemma-stable-difussion\nPurpose: speed/VRAM probe after both resolution+P4 smoke cards pass and before full Monet4 arms start.\nCommand:\n./scripts/run_longclip_sara_speed_probe_gpu_queue.sh GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd\nProbe candidates, all P4b RoPE / resolution enabled / same /mnt/e Unsplash+Monet data paths:\n1. config_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b8_acc1.json (batch=8, accum=1, effective=8)\n2. config_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b6_acc1.json (batch=6, accum=1, effective=6)\n3. config_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b4_acc2.json (batch=4, accum=2, effective=8 baseline)\nOutputs:\n- logs/queued_longclip_resolution_p4b_speed_probe_summary.tsv\n- logs/queued_longclip_resolution_p4b_speed_probe_<label>.log\n- logs/queued_longclip_resolution_p4b_speed_probe_<label>_gpu_mem.csv\n- output_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_*/longclip_sara_unet_attn2_kv_sparse.pt\nAcceptance:\n1. Run exactly the command above from the working directory; do not launch outside /tmp/hermes-gpu-0.lock.\n2. Runner verifies GPU UUID GPU-27ff99d6-d77d-2226-a4b5-7a11b8ef6bdd and refuses unexpected compute processes.\n3. At least one candidate exits 0; preserve failed larger-batch logs as evidence instead of retrying blindly.\n4. Summary TSV exists and records label, config, log, monitor, exit_code, elapsed_seconds, peak_gpu_mem_mib, status.\n5. For each successful candidate, checkpoint exists and validation_gate has passed=true, heldout_ran=true, heldout_passed=true, short_prompt_ran=true, short_prompt_passed=true, finite metrics.\n6. Recommend the full-run batch/accum choice in the card handoff. Use the same choice for P4a and P4b full runs if configs are updated later.\nDecision rule:\n- Prefer b8/accum1 if it succeeds and is >=15% faster per optimizer step than baseline without VRAM exhaustion.\n- Else prefer b6/accum1 only if clearly faster and acceptable despite effective batch change.\n- Else keep existing b4/accum2 full configs.\nFailure handling:\n- Exit 75 means lock unavailable; comment/block, do not bypass.\n- Exit 76 means unexpected GPU process; comment/block with nvidia-smi evidence, do not kill unless explicitly instructed.\n- OOM on b8/b6 is not a card failure if a smaller candidate succeeds; preserve logs and continue.\n",
+    "assignee": "coder",
+    "status": "done",
+    "priority": 0,
+    "tenant": null,
+    "workspace_kind": "dir",
+    "workspace_path": "/home/krz/PycharmProjects/gemma-stable-difussion",
+    "branch_name": null,
+    "project_id": null,
+    "created_by": "gpu-queue",
+    "created_at": 1784319001,
+    "started_at": 1784356205,
+    "completed_at": 1784356727,
+    "result": "Speed/VRAM probe completed under /tmp/hermes-gpu-0.lock. Summary: logs/queued_longclip_resolution_p4b_speed_probe_summary.tsv sha256=e4bf4cb6afac555c4b3f02cc69934f870c1a6c196198d0ae8cdfdf7b70d1fcfc. b8/accum1 failed: CUDA OOM in VAE encode, peak=24055MiB, log_sha256=43859acee6f49b88088c3cf9535df3cc0c0e6bdef8e5da97d17e98e5bf3cc5a2. b6/accum1 passed: 169s/30 steps, peak=20664MiB. b4/accum2 baseline passed: 199s/30 steps, peak=17308MiB. Decision: keep full configs at batch4/accum2 because b8 OOM and b6 changes effective batch to 6 and is slower per effective sample for one-epoch training; batch4/accum2 preserves fair paired arms and full data coverage.",
+    "skills": [
+      "gpu-kanban-queue"
+    ],
+    "max_retries": 1,
+    "session_id": null,
+    "workflow_template_id": null,
+    "current_step_key": null
+  },
+  "latest_summary": "Speed/VRAM probe completed under /tmp/hermes-gpu-0.lock. Summary: logs/queued_longclip_resolution_p4b_speed_probe_summary.tsv sha256=e4bf4cb6afac555c4b3f02cc69934f870c1a6c196198d0ae8cdfdf7b70d1fcfc. b8/accum1 failed: CUDA OOM in VAE encode, peak=24055MiB, log_sha256=43859acee6f49b88088c3cf9535df3cc0c0e6bdef8e5da97d17e98e5bf3cc5a2. b6/accum1 passed: 169s/30 steps, peak=20664MiB. b4/accum2 baseline passed: 199s/30 steps, peak=17308MiB. Decision: keep full configs at batch4/accum2 because b8 OOM and b6 changes effective batch to 6 and is slower per effective sample for one-epoch training; batch4/accum2 preserves fair paired arms and full data coverage.",
+  "parents": [
+    "t_0bc39d3f"
+  ],
+  "children": [
+    "t_32c746f7"
+  ],
+  "comments": [],
+  "events": [
+    {
+      "kind": "created",
+      "payload": {
+        "assignee": "coder",
+        "status": "todo",
+        "parents": [
+          "t_0bc39d3f"
+        ],
+        "tenant": null,
+        "branch_name": null,
+        "skills": [
+          "gpu-kanban-queue"
+        ],
+        "goal_mode": true
+      },
+      "created_at": 1784319001,
+      "run_id": null
+    },
+    {
+      "kind": "promoted",
+      "payload": null,
+      "created_at": 1784356172,
+      "run_id": null
+    },
+    {
+      "kind": "claimed",
+      "payload": {
+        "lock": "chris-rome:411618",
+        "expires": 1784399405,
+        "run_id": 16
+      },
+      "created_at": 1784356205,
+      "run_id": 16
+    },
+    {
+      "kind": "heartbeat",
+      "payload": {
+        "note": "manual runner heartbeat: speed probe proc_f32978bb6bb8 running; P4b b8/accum1 candidate launched and reached optimizer step >=3 without immediate OOM."
+      },
+      "created_at": 1784356283,
+      "run_id": 16
+    },
+    {
+      "kind": "heartbeat",
+      "payload": {
+        "note": "manual runner heartbeat: speed probe proc_f32978bb6bb8 still running; runner has progressed from b8/accum1 to b6/accum1 candidate, preserving logs/summary for each candidate."
+      },
+      "created_at": 1784356352,
+      "run_id": 16
+    },
+    {
+      "kind": "heartbeat",
+      "payload": {
+        "note": "manual runner heartbeat: speed probe proc_f32978bb6bb8 still running; b6/accum1 succeeded in 169s peak=20664MiB; baseline b4/accum2 currently running."
+      },
+      "created_at": 1784356618,
+      "run_id": 16
+    },
+    {
+      "kind": "completed",
+      "payload": {
+        "result_len": 657,
+        "summary": "Speed/VRAM probe completed under /tmp/hermes-gpu-0.lock. Summary: logs/queued_longclip_resolution_p4b_speed_probe_summary.tsv sha256=e4bf4cb6afac555c4b3f02cc69934f870c1a6c196198d0ae8cdfdf7b70d1fcfc. b8/accum1 failed: CUDA OOM in VAE encode, peak=24055MiB, log_sha256=43859acee6f49b88088c3cf9535df3cc0c0e6bdef8e5da97d17e98e5bf3cc5a2. b6/accum1 passed: 169s/30 steps, peak=20664MiB. b4/accum2 baseline "
+      },
+      "created_at": 1784356727,
+      "run_id": 16
+    }
+  ],
+  "runs": [
+    {
+      "id": 16,
+      "profile": "coder",
+      "step_key": null,
+      "status": "done",
+      "outcome": "completed",
+      "summary": "Speed/VRAM probe completed under /tmp/hermes-gpu-0.lock. Summary: logs/queued_longclip_resolution_p4b_speed_probe_summary.tsv sha256=e4bf4cb6afac555c4b3f02cc69934f870c1a6c196198d0ae8cdfdf7b70d1fcfc. b8/accum1 failed: CUDA OOM in VAE encode, peak=24055MiB, log_sha256=43859acee6f49b88088c3cf9535df3cc0c0e6bdef8e5da97d17e98e5bf3cc5a2. b6/accum1 passed: 169s/30 steps, peak=20664MiB. b4/accum2 baseline passed: 199s/30 steps, peak=17308MiB. Decision: keep full configs at batch4/accum2 because b8 OOM and b6 changes effective batch to 6 and is slower per effective sample for one-epoch training; batch4/accum2 preserves fair paired arms and full data coverage.",
+      "error": null,
+      "metadata": null,
+      "worker_pid": null,
+      "started_at": 1784356205,
+      "ended_at": 1784356727
+    }
+  ]
+}

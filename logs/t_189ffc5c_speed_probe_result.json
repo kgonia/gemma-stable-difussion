@@ -1,0 +1,182 @@
+{
+  "summary_rows": [
+    {
+      "label": "p4b_rope_b8_acc1",
+      "config": "config_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b8_acc1.json",
+      "log": "logs/queued_longclip_resolution_p4b_speed_probe_p4b_rope_b8_acc1.log",
+      "monitor": "logs/queued_longclip_resolution_p4b_speed_probe_p4b_rope_b8_acc1_gpu_mem.csv",
+      "exit_code": "1",
+      "elapsed_seconds": "92",
+      "peak_gpu_mem_mib": "24055",
+      "status": "failed"
+    },
+    {
+      "label": "p4b_rope_b6_acc1",
+      "config": "config_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b6_acc1.json",
+      "log": "logs/queued_longclip_resolution_p4b_speed_probe_p4b_rope_b6_acc1.log",
+      "monitor": "logs/queued_longclip_resolution_p4b_speed_probe_p4b_rope_b6_acc1_gpu_mem.csv",
+      "exit_code": "0",
+      "elapsed_seconds": "169",
+      "peak_gpu_mem_mib": "20664",
+      "status": "passed"
+    },
+    {
+      "label": "p4b_rope_b4_acc2_baseline",
+      "config": "config_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b4_acc2.json",
+      "log": "logs/queued_longclip_resolution_p4b_speed_probe_p4b_rope_b4_acc2_baseline.log",
+      "monitor": "logs/queued_longclip_resolution_p4b_speed_probe_p4b_rope_b4_acc2_baseline_gpu_mem.csv",
+      "exit_code": "0",
+      "elapsed_seconds": "199",
+      "peak_gpu_mem_mib": "17308",
+      "status": "passed"
+    }
+  ],
+  "verified_checkpoints": [
+    {
+      "label": "p4b_rope_b6_acc1",
+      "checkpoint": "output_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b6_acc1/longclip_sara_unet_attn2_kv_sparse.pt",
+      "checkpoint_size_bytes": 123872365,
+      "checkpoint_sha256": "359670983c0e22bdfdbe5b3d059d06b0f5004a491a504ed813dde9a7e8d3c3de",
+      "elapsed_seconds": 169,
+      "peak_gpu_mem_mib": 20664,
+      "optimizer_steps": 30,
+      "validation_gate": {
+        "baseline_loss": 0.3282653216738254,
+        "final_loss": 0.32822571287397295,
+        "baseline_bucket_summary": {
+          "global_loss": 0.3282653216738254,
+          "sample_count": 4,
+          "buckets": {
+            "1024x1024": {
+              "count": 1,
+              "mean_loss": 0.0023712264373898506
+            },
+            "1024x640": {
+              "count": 1,
+              "mean_loss": 1.0663883686065674
+            },
+            "1024x768": {
+              "count": 1,
+              "mean_loss": 0.03144681453704834
+            },
+            "768x1024": {
+              "count": 1,
+              "mean_loss": 0.21285487711429596
+            }
+          }
+        },
+        "final_bucket_summary": {
+          "global_loss": 0.32822571287397295,
+          "sample_count": 4,
+          "buckets": {
+            "1024x1024": {
+              "count": 1,
+              "mean_loss": 0.002371246460825205
+            },
+            "1024x640": {
+              "count": 1,
+              "mean_loss": 1.0662121772766113
+            },
+            "1024x768": {
+              "count": 1,
+              "mean_loss": 0.0314413346350193
+            },
+            "768x1024": {
+              "count": 1,
+              "mean_loss": 0.21287809312343597
+            }
+          }
+        },
+        "relative_change": -0.00012066093259703916,
+        "max_relative_regression": 0.1,
+        "heldout_ran": true,
+        "heldout_passed": true,
+        "short_prompt_relative_rms": 0.004011255688965321,
+        "short_prompt_max_relative_rms": 0.1,
+        "short_prompt_ran": true,
+        "short_prompt_passed": true,
+        "passed": true
+      }
+    },
+    {
+      "label": "p4b_rope_b4_acc2_baseline",
+      "checkpoint": "output_longclip_sara_15pct_plus_monet4_resolution_p4b_rope_speed_probe_b4_acc2/longclip_sara_unet_attn2_kv_sparse.pt",
+      "checkpoint_size_bytes": 123872365,
+      "checkpoint_sha256": "bba9c24451530a3874fe4c0f561e1a15b6eff2452db30d82be81d0f05fee70db",
+      "elapsed_seconds": 199,
+      "peak_gpu_mem_mib": 17308,
+      "optimizer_steps": 30,
+      "validation_gate": {
+        "baseline_loss": 0.3282653216738254,
+        "final_loss": 0.32819884008495137,
+        "baseline_bucket_summary": {
+          "global_loss": 0.3282653216738254,
+          "sample_count": 4,
+          "buckets": {
+            "1024x1024": {
+              "count": 1,
+              "mean_loss": 0.0023712264373898506
+            },
+            "1024x640": {
+              "count": 1,
+              "mean_loss": 1.0663883686065674
+            },
+            "1024x768": {
+              "count": 1,
+              "mean_loss": 0.03144681453704834
+            },
+            "768x1024": {
+              "count": 1,
+              "mean_loss": 0.21285487711429596
+            }
+          }
+        },
+        "final_bucket_summary": {
+          "global_loss": 0.32819884008495137,
+          "sample_count": 4,
+          "buckets": {
+            "1024x1024": {
+              "count": 1,
+              "mean_loss": 0.0023716434370726347
+            },
+            "1024x640": {
+              "count": 1,
+              "mean_loss": 1.0661193132400513
+            },
+            "1024x768": {
+              "count": 1,
+              "mean_loss": 0.03143811225891113
+            },
+            "768x1024": {
+              "count": 1,
+              "mean_loss": 0.21286629140377045
+            }
+          }
+        },
+        "relative_change": -0.00020252394780850597,
+        "max_relative_regression": 0.1,
+        "heldout_ran": true,
+        "heldout_passed": true,
+        "short_prompt_relative_rms": 0.004051543772220612,
+        "short_prompt_max_relative_rms": 0.1,
+        "short_prompt_ran": true,
+        "short_prompt_passed": true,
+        "passed": true
+      }
+    }
+  ],
+  "decision": {
+    "recommended_full_train_batch_size": 4,
+    "recommended_full_gradient_accumulation_steps": 2,
+    "reason": "batch8/accum1 OOM; batch6/accum1 passed and was 15.1% faster per optimizer step, but effective batch is 6 not 8 and samples/sec is lower than baseline for one-epoch training; keep batch4/accum2 for fair paired arms and full data coverage.",
+    "b8_failure": {
+      "exit_code": 1,
+      "peak_gpu_mem_mib": 24055,
+      "cause": "CUDA out of memory in VAE encode"
+    },
+    "b6_seconds_per_opt_step": 5.633333333333334,
+    "b4_seconds_per_opt_step": 6.633333333333334,
+    "b6_samples_per_second_effective": 1.0650887573964498,
+    "b4_samples_per_second_effective": 1.2060301507537687
+  }
+}
