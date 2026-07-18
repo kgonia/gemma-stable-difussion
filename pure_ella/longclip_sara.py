@@ -72,6 +72,7 @@ class LongClipSaraConfig:
     epochs: int = 1
     max_opt_steps: int = 1463
     sara_lr: float = 1e-5
+    sidecar_lr: float | None = None
     lr_warmup_steps: int = 100
     lr_decay_steps: int = 1463
     grad_clip_norm: float = 0.5
@@ -148,6 +149,10 @@ class LongClipSaraConfig:
             raise ValueError("batch size and gradient accumulation must be positive")
         if self.epochs < 1 or self.max_samples < 1 or self.max_opt_steps < 1:
             raise ValueError("LongCLIP SaRA needs positive data and step budgets")
+        if self.sara_lr <= 0:
+            raise ValueError("sara_lr must be positive")
+        if self.sidecar_lr is not None and self.sidecar_lr <= 0:
+            raise ValueError("sidecar_lr must be positive when configured")
         if self.validation_max_samples < 0:
             raise ValueError("validation_max_samples must be non-negative")
         if self.validation_max_relative_regression < 0:

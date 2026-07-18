@@ -97,6 +97,7 @@ from scripts.train_longclip_sara import (
     bucket_keys_for_batch,
     fixed_validation_timesteps,
     heldout_diffusion_loss,
+    longclip_optimizer_parameter_groups,
     masked_per_sample_mse as longclip_masked_per_sample_mse,
     relative_prediction_rms,
     validation_skip_reason,
@@ -268,6 +269,54 @@ class ConnectorTrainingTests(unittest.TestCase):
                 output_dir="output", data_sources=["train.parquet"],
                 context_tokens=77,
             )
+
+    def test_longclip_config_validates_separate_sidecar_lr(self):
+        cfg = LongClipSaraConfig(
+            sd_checkpoint="stylejourney.safetensors",
+            longclip_repo="repo", longclip_checkpoint="model.pt",
+            output_dir="output", data_sources=["train.parquet"],
+            sara_lr=3e-6, sidecar_lr=1e-5,
+        )
+        self.assertEqual(cfg.sara_lr, 3e-6)
+        self.assertEqual(cfg.sidecar_lr, 1e-5)
+        with self.assertRaisesRegex(ValueError, "sidecar_lr must be positive"):
+            LongClipSaraConfig(
+                sd_checkpoint="stylejourney.safetensors",
+                longclip_repo="repo", longclip_checkpoint="model.pt",
+                output_dir="output", data_sources=["train.parquet"],
+                sidecar_lr=0.0,
+            )
+
+    def test_longclip_optimizer_separates_sparse_and_sidecar_lrs(self):
+        class FakeUNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.sparse_base = nn.Linear(3, 4)
+                self.class_embedding = nn.Linear(2, 4)
+                self.p4_blocks = nn.ModuleDict({"pre_mid": nn.Linear(4, 4)})
+
+        unet = FakeUNet()
+        cfg = SimpleNamespace(
+            resolution_conditioning_enabled=True,
+            p4_enabled=True,
+            sara_lr=3e-6,
+            sidecar_lr=1e-5,
+        )
+        groups, summary = longclip_optimizer_parameter_groups(unet, cfg)
+        self.assertEqual([group["name"] for group in groups], ["sara", "sidecars"])
+        self.assertEqual([group["lr"] for group in groups], [3e-6, 1e-5])
+        sparse_ids = {id(parameter) for parameter in unet.sparse_base.parameters()}
+        sidecar_ids = {
+            id(parameter)
+            for module in (unet.class_embedding, unet.p4_blocks)
+            for parameter in module.parameters()
+        }
+        self.assertEqual({id(parameter) for parameter in groups[0]["params"]}, sparse_ids)
+        self.assertEqual({id(parameter) for parameter in groups[1]["params"]}, sidecar_ids)
+        self.assertEqual(
+            summary["sara_tensor_elements"],
+            sum(parameter.numel() for parameter in unet.sparse_base.parameters()),
+        )
 
     def test_resolution_conditioner_zero_init_and_latent_features(self):
         conditioner = ResolutionConditioner(output_dim=6, hidden_dim=8)

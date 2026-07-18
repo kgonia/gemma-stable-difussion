@@ -59,6 +59,52 @@ def lr_scheduler(optimizer, cfg):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
 
 
+def longclip_optimizer_parameter_groups(unet, cfg) -> tuple[list[dict], dict[str, int]]:
+    """Separate sparse base-U-Net tensors from resolution/P4 sidecars."""
+    sidecar_parameters = []
+    if cfg.resolution_conditioning_enabled:
+        sidecar_parameters.extend(unet.class_embedding.parameters())
+    if cfg.p4_enabled:
+        sidecar_parameters.extend(unet.p4_blocks.parameters())
+    sidecar_ids = {id(parameter) for parameter in sidecar_parameters}
+    sparse_parameters = [
+        parameter for parameter in unet.parameters()
+        if parameter.requires_grad and id(parameter) not in sidecar_ids
+    ]
+    sidecar_parameters = [
+        parameter for parameter in sidecar_parameters if parameter.requires_grad
+    ]
+    trainable_ids = {
+        id(parameter) for parameter in unet.parameters() if parameter.requires_grad
+    }
+    grouped_ids = {id(parameter) for parameter in sparse_parameters + sidecar_parameters}
+    if grouped_ids != trainable_ids:
+        raise RuntimeError("LongCLIP optimizer groups do not cover trainable parameters exactly")
+    groups = []
+    if sparse_parameters:
+        groups.append({"params": sparse_parameters, "lr": cfg.sara_lr, "name": "sara"})
+    if sidecar_parameters:
+        groups.append({
+            "params": sidecar_parameters,
+            "lr": cfg.sidecar_lr if cfg.sidecar_lr is not None else cfg.sara_lr,
+            "name": "sidecars",
+        })
+    if not groups:
+        raise RuntimeError("LongCLIP training has no trainable parameter groups")
+    summary = {
+        "sara_tensor_elements": sum(parameter.numel() for parameter in sparse_parameters),
+        "sidecar_parameters": sum(parameter.numel() for parameter in sidecar_parameters),
+    }
+    return groups, summary
+
+
+def optimizer_lr_summary(optimizer) -> str:
+    return " ".join(
+        f"{group.get('name', index)}_lr={group['lr']:.3g}"
+        for index, group in enumerate(optimizer.param_groups)
+    )
+
+
 def resolution_condition_for_batch(
     batch: dict, latent: torch.Tensor, cfg, *, training: bool = True,
 ) -> torch.Tensor | None:
@@ -557,9 +603,16 @@ def main():
     else:
         sidecar_smoke = {"skipped": "initial_sidecar_state_loaded"}
     hooks = install_sara_gradient_masks(state.unet)
-    trainable = [p for p in state.unet.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable, lr=cfg.sara_lr,
+    optimizer_groups, optimizer_group_summary = longclip_optimizer_parameter_groups(
+        state.unet, cfg)
+    trainable = [
+        parameter for group in optimizer_groups for parameter in group["params"]
+    ]
+    optimizer = torch.optim.AdamW(optimizer_groups, lr=cfg.sara_lr,
                                   weight_decay=0.0, eps=1e-6)
+    print(
+        "LongCLIP optimizer groups: "
+        f"{optimizer_group_summary} {optimizer_lr_summary(optimizer)}")
     scheduler = lr_scheduler(optimizer, cfg)
     state.unet.train()
     state.vae.eval()
@@ -635,7 +688,7 @@ def main():
                 step += 1
                 if step % 25 == 0 or step == 1:
                     print(f"longclip_sara step {step}: loss={loss.item():.6f} "
-                          f"lr={optimizer.param_groups[0]['lr']:.3g}")
+                          f"{optimizer_lr_summary(optimizer)}")
                     if p4_metrics_before_step:
                         print(f"longclip_sara p4 telemetry step {step}: {p4_metrics_before_step}")
                 if wandb is not None:
@@ -688,7 +741,8 @@ def main():
         getattr(state, "longclip_validation_bucket_summary", None)
         if final_validation_loss is not None else None)
     validation_relative_change = None
-    if baseline_validation_loss is not None:
+    gate_failures = []
+    if baseline_validation_loss is not None and final_validation_loss is not None:
         validation_relative_change = (
             final_validation_loss - baseline_validation_loss
         ) / max(baseline_validation_loss, 1e-12)
@@ -700,11 +754,11 @@ def main():
             f"relative_change={validation_relative_change:+.4%} "
             f"allowed_max={allowed:.6f}")
         if final_validation_loss > allowed:
-            raise RuntimeError(
+            gate_failures.append(
                 "LongCLIP final validation gate failed: "
                 f"loss {final_validation_loss:.6f} exceeds {allowed:.6f}")
     elif cfg.require_validation_gate:
-        raise RuntimeError("Required LongCLIP final validation did not run")
+        gate_failures.append("Required LongCLIP final validation did not run")
 
     short_prompt_relative_rms = None
     if short_prompt_baseline is not None:
@@ -716,7 +770,7 @@ def main():
             f"relative_rms={short_prompt_relative_rms:.6f} "
             f"limit={cfg.short_prompt_max_relative_rms:.6f}")
         if short_prompt_relative_rms > cfg.short_prompt_max_relative_rms:
-            raise RuntimeError(
+            gate_failures.append(
                 "LongCLIP short-prompt regression gate failed: "
                 f"relative RMS {short_prompt_relative_rms:.6f} exceeds "
                 f"{cfg.short_prompt_max_relative_rms:.6f}")
@@ -776,9 +830,22 @@ def main():
             "truncated_training_prompts": encoder.truncated_prompt_count,
             "p4_final_telemetry": p4_telemetry(state.unet),
         },
-        "completion": {"completed": True, "optimizer_steps": step},
+        "completion": {
+            "completed": not gate_failures and validation_summary["passed"],
+            "optimizer_steps": step,
+            "gate_failures": gate_failures,
+        },
         "run_config": cfg.to_dict(),
     }
+    if gate_failures:
+        failed_path = (
+            Path(cfg.output_dir) /
+            "longclip_sara_unet_attn2_kv_sparse.failed_gate.pt"
+        )
+        torch.save(artifact, failed_path)
+        print(f"LongCLIP failed-gate candidate saved: {failed_path}")
+        print(f"SaRA selected-weight delta: {delta}")
+        raise RuntimeError("; ".join(gate_failures))
     path = Path(cfg.output_dir) / "longclip_sara_unet_attn2_kv_sparse.pt"
     torch.save(artifact, path)
     print(f"LongCLIP SaRA patch saved: {path}")
