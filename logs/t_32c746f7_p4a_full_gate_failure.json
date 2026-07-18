@@ -1,0 +1,47 @@
+{
+  "task_id": "t_32c746f7",
+  "timestamp": "2026-07-18T15:09:15+02:00",
+  "status": "failed_required_gate",
+  "command_exit_code": 1,
+  "config": "config_longclip_sara_15pct_plus_monet4_resolution_p4a_from_3epoch.json",
+  "log": {
+    "path": "logs/queued_longclip_resolution_p4a_from_3epoch.log",
+    "size_bytes": 815185,
+    "sha256": "adfb77864c3de75cb37660570395d6349c2dbb0cb72cfedda2f82b5bcad874bd"
+  },
+  "training": {
+    "configured_optimizer_steps": 6435,
+    "last_periodic_training_step": 6425,
+    "last_periodic_loss": 0.020842,
+    "validation_passes": 25,
+    "generation_grids_saved": 12
+  },
+  "heldout_validation": {
+    "baseline_loss": 0.151453,
+    "final_loss": 0.151414,
+    "relative_change": -0.000260,
+    "max_relative_regression": 0.02,
+    "passed": true
+  },
+  "short_prompt_gate": {
+    "relative_rms": 0.100233,
+    "max_relative_rms": 0.05,
+    "passed": false
+  },
+  "last_p4_telemetry": {
+    "step": 6425,
+    "gate": 0.0017940237885341048,
+    "tanh_gate": 0.0017940218094736338,
+    "branch_rms": 0.15511378645896912,
+    "output_delta_rms": 0.00027810470783151686,
+    "gate_grad": -1.8328369151277002e-06
+  },
+  "output": {
+    "directory": "output_longclip_sara_15pct_plus_monet4_resolution_p4a_from_3epoch",
+    "periodic_grids": [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000],
+    "checkpoint_expected": "output_longclip_sara_15pct_plus_monet4_resolution_p4a_from_3epoch/longclip_sara_unet_attn2_kv_sparse.pt",
+    "checkpoint_exists": false
+  },
+  "failure": "LongCLIP short-prompt regression gate failed: relative RMS 0.100233 exceeds 0.050000",
+  "disposition": "Do not accept or bypass the gate. Do not start P4b. Diagnose and rerun with a recovery configuration that preserves the same 0.05 contract."
+}
