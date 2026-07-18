@@ -115,6 +115,7 @@ class LongClipSaraConfig:
     ])
     require_short_prompt_regression_gate: bool = True
     short_prompt_max_relative_rms: float = 0.05
+    short_prompt_validation_every_opt_steps: int = 0
     complex_generation_cases: list[dict[str, Any]] = field(
         default_factory=lambda: TrainConfig().complex_generation_cases)
     run_final_visual_check: bool = True
@@ -153,6 +154,9 @@ class LongClipSaraConfig:
             raise ValueError("sara_lr must be positive")
         if self.sidecar_lr is not None and self.sidecar_lr <= 0:
             raise ValueError("sidecar_lr must be positive when configured")
+        if self.short_prompt_validation_every_opt_steps < 0:
+            raise ValueError(
+                "short_prompt_validation_every_opt_steps must be non-negative")
         if self.validation_max_samples < 0:
             raise ValueError("validation_max_samples must be non-negative")
         if self.validation_max_relative_regression < 0:

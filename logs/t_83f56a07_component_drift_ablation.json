@@ -1,0 +1,14 @@
+{
+  "candidate": "output_longclip_sara_15pct_plus_monet4_resolution_p4a_recovery_probe_500/longclip_sara_unet_attn2_kv_sparse.pt",
+  "candidate_recorded_combined_relative_rms": 0.013411612249910831,
+  "config": "config_longclip_sara_15pct_plus_monet4_resolution_p4a_recovery_probe_500.json",
+  "optimizer_steps": 500,
+  "relative_rms_vs_inherited_baseline": {
+    "combined": 0.013411612249910831,
+    "p4_only": 0.002838223474100232,
+    "resolution_only": 0.008525234647095203,
+    "sidecars_only": 0.008512751199305058,
+    "sparse_only": 0.009271356277167797
+  },
+  "short_prompt_limit": 0.05
+}

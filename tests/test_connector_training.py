@@ -286,6 +286,14 @@ class ConnectorTrainingTests(unittest.TestCase):
                 output_dir="output", data_sources=["train.parquet"],
                 sidecar_lr=0.0,
             )
+        with self.assertRaisesRegex(
+                ValueError, "short_prompt_validation_every_opt_steps"):
+            LongClipSaraConfig(
+                sd_checkpoint="stylejourney.safetensors",
+                longclip_repo="repo", longclip_checkpoint="model.pt",
+                output_dir="output", data_sources=["train.parquet"],
+                short_prompt_validation_every_opt_steps=-1,
+            )
 
     def test_longclip_optimizer_separates_sparse_and_sidecar_lrs(self):
         class FakeUNet(nn.Module):

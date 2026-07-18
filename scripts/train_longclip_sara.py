@@ -706,6 +706,22 @@ def main():
                         print(f"longclip_sara validation step {step}: loss={val_loss:.6f}")
                         if wandb is not None:
                             wandb.log({"longclip_sara_val/loss": val_loss}, step=step)
+                if (short_prompt_baseline is not None
+                        and cfg.short_prompt_validation_every_opt_steps
+                        and step % cfg.short_prompt_validation_every_opt_steps == 0):
+                    periodic_signature = short_prompt_prediction_signature(
+                        state, cfg, encoder)
+                    periodic_short_prompt_rms = relative_prediction_rms(
+                        periodic_signature, short_prompt_baseline)
+                    print(
+                        f"longclip_sara short-prompt drift step {step}: "
+                        f"relative_rms={periodic_short_prompt_rms:.6f} "
+                        f"limit={cfg.short_prompt_max_relative_rms:.6f}")
+                    if wandb is not None:
+                        wandb.log({
+                            "longclip_sara_val/short_prompt_relative_rms":
+                                periodic_short_prompt_rms,
+                        }, step=step)
                 if (cfg.generation_grid_every_opt_steps
                         and step % cfg.generation_grid_every_opt_steps == 0):
                     save_periodic_prompt_grid(state, cfg, step)
