@@ -104,6 +104,8 @@ class LongClipSaraConfig:
     require_validation_gate: bool = False
     validation_max_relative_regression: float = 0.02
     generation_grid_every_opt_steps: int = 0
+    generation_grid_mode: Literal["simple", "complex"] = "simple"
+    periodic_checkpoint_every_opt_steps: int = 0
     base_seed: int = 1234
     val_steps: int = 30
     val_guidance: float = 5.5
@@ -157,6 +159,13 @@ class LongClipSaraConfig:
         if self.short_prompt_validation_every_opt_steps < 0:
             raise ValueError(
                 "short_prompt_validation_every_opt_steps must be non-negative")
+        if self.generation_grid_every_opt_steps < 0:
+            raise ValueError("generation_grid_every_opt_steps must be non-negative")
+        if self.generation_grid_mode not in {"simple", "complex"}:
+            raise ValueError("generation_grid_mode must be 'simple' or 'complex'")
+        if self.periodic_checkpoint_every_opt_steps < 0:
+            raise ValueError(
+                "periodic_checkpoint_every_opt_steps must be non-negative")
         if self.validation_max_samples < 0:
             raise ValueError("validation_max_samples must be non-negative")
         if self.validation_max_relative_regression < 0:

@@ -287,35 +287,117 @@ def force_include_initial_sara_masks(unet, summary: dict, initial_sparse_values:
     return updated
 
 
-def save_visual_check(state, cfg):
-    """Save the four canonical cases under the trained LongCLIP+SaRA model."""
-    if not cfg.run_final_visual_check or not cfg.complex_generation_cases:
-        return
+def save_complex_visual_set(state, cfg, *, opt_step: int | None = None):
+    """Save canonical cases with each case's declared generation settings."""
+    if not cfg.complex_generation_cases:
+        return None
+    suffix = "final" if opt_step is None else f"step_{opt_step:06d}"
+    case_dir = Path(cfg.output_dir) / f"complex_{suffix}"
+    case_dir.mkdir(parents=True, exist_ok=True)
     images, labels = [], []
+    records = []
     old_scheduler = state.inf_scheduler
+    was_training = state.unet.training
+    state.unet.eval()
     try:
-        for case in cfg.complex_generation_cases:
+        for index, case in enumerate(cfg.complex_generation_cases, 1):
             requested = scheduler_for_generation_case(case, state.scheduler)
-            if requested is not None:
-                state.inf_scheduler = requested
+            state.inf_scheduler = requested if requested is not None else old_scheduler
+            height = int(case.get("height", 512))
+            width = int(case.get("width", 512))
             image = generate_clip_teacher(
                 case["prompt"], state,
                 steps=case.get("steps", cfg.val_steps),
                 guidance=case.get("guidance", cfg.val_guidance),
                 seed=case.get("seed", cfg.val_seed),
                 negative_prompt=case.get("negative_prompt", ""),
-                height=case.get("height", 512), width=case.get("width", 512),
+                height=height, width=width,
             )
+            image_path = case_dir / (
+                f"{index:02d}_{case['name']}_{width}x{height}.png")
+            image.save(image_path)
             images.append(image)
             labels.append(
                 f"LongCLIP+SaRA | {case['name']} | "
                 f"{case.get('sampler', 'default')} | "
                 f"{case.get('steps', cfg.val_steps)} steps")
+            records.append({
+                "path": str(image_path),
+                "name": case["name"],
+                "prompt": case["prompt"],
+                "negative_prompt": case.get("negative_prompt", ""),
+                "sampler": case.get("sampler", "default"),
+                "steps": case.get("steps", cfg.val_steps),
+                "guidance": case.get("guidance", cfg.val_guidance),
+                "seed": case.get("seed", cfg.val_seed),
+                "width": width,
+                "height": height,
+                "bytes": image_path.stat().st_size,
+            })
     finally:
         state.inf_scheduler = old_scheduler
+        state.unet.train(was_training)
+    grid_path = Path(cfg.output_dir) / f"longclip_sara_complex_{suffix}.png"
     save_validation_grid(
-        images, labels, f"{cfg.output_dir}/longclip_sara_complex_prompts.png",
-        "LongCLIP-L direct conditioning + sparse SaRA", cols=2)
+        images, labels, str(grid_path),
+        f"LongCLIP-L + resolution + P4 {cfg.p4_variant} | {suffix}", cols=2)
+    manifest_path = case_dir / "manifest.json"
+    manifest_path.write_text(json.dumps({
+        "optimizer_step": opt_step,
+        "p4_variant": cfg.p4_variant,
+        "records": records,
+        "grid": str(grid_path),
+    }, indent=2) + "\n")
+    print(f"LongCLIP complex visual set saved: {grid_path}")
+    return {"grid": str(grid_path), "manifest": str(manifest_path), "records": records}
+
+
+def save_visual_check(state, cfg):
+    """Save the canonical final cases under the trained model."""
+    if not cfg.run_final_visual_check:
+        return
+    save_complex_visual_set(state, cfg)
+
+
+def save_periodic_weight_snapshot(
+    state, cfg, encoder, *, opt_step: int, sidecar_summary: dict,
+    initial_sidecar_loaded, sidecar_smoke: dict, sara_summary: dict,
+    sara_baseline: dict,
+):
+    """Atomically preserve evaluable weights before periodic visual generation."""
+    artifact = {
+        "longclip_sara_schema": longclip_sara_schema(cfg, encoder),
+        "sparse_values": collect_sara_sparse_values(state.unet),
+        "resolution_conditioner_state_dict": (
+            {key: value.detach().cpu()
+             for key, value in state.unet.class_embedding.state_dict().items()}
+            if cfg.resolution_conditioning_enabled else None),
+        "p4_state_dict": p4_state_dict(state.unet) if cfg.p4_enabled else None,
+        "sidecar_summary": sidecar_summary,
+        "initial_sidecar_loaded": initial_sidecar_loaded,
+        "sidecar_smoke": sidecar_smoke,
+        "sara_sparse_summary": sara_summary,
+        "sara_selected_delta": sara_selected_delta_metrics(
+            state.unet, sara_baseline),
+        "validation_gate": {
+            "passed": False,
+            "periodic_snapshot": True,
+        },
+        "training_summary": {
+            "truncated_training_prompts": encoder.truncated_prompt_count,
+            "p4_telemetry": p4_telemetry(state.unet),
+        },
+        "completion": {
+            "completed": False,
+            "optimizer_steps": opt_step,
+            "periodic_snapshot": True,
+        },
+        "run_config": cfg.to_dict(),
+    }
+    path = Path(cfg.output_dir) / f"longclip_sara_step_{opt_step:06d}.candidate.pt"
+    atomic_torch_save(artifact, path)
+    print(f"LongCLIP periodic weight snapshot saved: {path}")
+    return path
 
 
 def validation_skip_reason(cfg) -> str | None:
@@ -331,6 +413,14 @@ def finite_float(value: float | None) -> float | None:
         return None
     numeric = float(value)
     return numeric if math.isfinite(numeric) else None
+
+
+def atomic_torch_save(artifact: dict, path: Path) -> None:
+    """Write a Torch artifact without exposing a partial destination file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(artifact, temporary)
+    os.replace(temporary, path)
 
 
 def deterministic_validation_captions(batch: dict) -> list[str]:
@@ -630,7 +720,8 @@ def main():
                       step=0)
     short_prompt_baseline = (
         short_prompt_prediction_signature(state, cfg, encoder)
-        if cfg.require_short_prompt_regression_gate else None)
+        if (cfg.require_short_prompt_regression_gate
+            or cfg.short_prompt_validation_every_opt_steps) else None)
 
     step = 0
     accumulation = 0
@@ -722,9 +813,22 @@ def main():
                             "longclip_sara_val/short_prompt_relative_rms":
                                 periodic_short_prompt_rms,
                         }, step=step)
+                if (cfg.periodic_checkpoint_every_opt_steps
+                        and step % cfg.periodic_checkpoint_every_opt_steps == 0):
+                    save_periodic_weight_snapshot(
+                        state, cfg, encoder, opt_step=step,
+                        sidecar_summary=sidecar_summary,
+                        initial_sidecar_loaded=initial_sidecar_loaded,
+                        sidecar_smoke=sidecar_smoke,
+                        sara_summary=sara_summary,
+                        sara_baseline=baseline,
+                    )
                 if (cfg.generation_grid_every_opt_steps
                         and step % cfg.generation_grid_every_opt_steps == 0):
-                    save_periodic_prompt_grid(state, cfg, step)
+                    if cfg.generation_grid_mode == "complex":
+                        save_complex_visual_set(state, cfg, opt_step=step)
+                    else:
+                        save_periodic_prompt_grid(state, cfg, step)
                 if step >= cfg.max_opt_steps:
                     break
             if step >= cfg.max_opt_steps:
@@ -785,7 +889,8 @@ def main():
             "LongCLIP short-prompt prediction drift: "
             f"relative_rms={short_prompt_relative_rms:.6f} "
             f"limit={cfg.short_prompt_max_relative_rms:.6f}")
-        if short_prompt_relative_rms > cfg.short_prompt_max_relative_rms:
+        if (cfg.require_short_prompt_regression_gate
+                and short_prompt_relative_rms > cfg.short_prompt_max_relative_rms):
             gate_failures.append(
                 "LongCLIP short-prompt regression gate failed: "
                 f"relative RMS {short_prompt_relative_rms:.6f} exceeds "
@@ -858,12 +963,12 @@ def main():
             Path(cfg.output_dir) /
             "longclip_sara_unet_attn2_kv_sparse.failed_gate.pt"
         )
-        torch.save(artifact, failed_path)
+        atomic_torch_save(artifact, failed_path)
         print(f"LongCLIP failed-gate candidate saved: {failed_path}")
         print(f"SaRA selected-weight delta: {delta}")
         raise RuntimeError("; ".join(gate_failures))
     path = Path(cfg.output_dir) / "longclip_sara_unet_attn2_kv_sparse.pt"
-    torch.save(artifact, path)
+    atomic_torch_save(artifact, path)
     print(f"LongCLIP SaRA patch saved: {path}")
     print(f"SaRA selected-weight delta: {delta}")
     print(f"Completed {step} updates in {(time.time() - started) / 60:.1f} min; "

@@ -1,0 +1,190 @@
+{
+  "sd_checkpoint": "/mnt/e/stable-diffusion-webui/models/Stable-diffusion/stylejourney_v10.safetensors",
+  "longclip_repo": "/tmp/Long-CLIP",
+  "longclip_checkpoint": "/tmp/longclip-checkpoints/longclip-L.pt",
+  "output_dir": "./output_longclip_resolution_p4b_rope_monet4_full_stylejourney",
+  "data_sources": [
+    {
+      "name": "unsplash-lite-gemma-captions-train",
+      "path": "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/train.parquet",
+      "sample_count": 11708,
+      "prompt_source_fields": [
+        "training_caption",
+        "caption_detailed",
+        "caption_long",
+        "long_caption",
+        "prompt",
+        "caption",
+        "text"
+      ],
+      "prompt_source_mode": "first"
+    },
+    {
+      "name": "monet-cc12m-shards-000000-000003",
+      "path": "/mnt/e/data/monet/v1.2.0/cc12m/0-0/00000[0-3].tar",
+      "sample_count": 39752,
+      "verified_shards": [
+        {
+          "file": "000000.tar",
+          "size_bytes": 2287052800,
+          "sha256": "7006cd9ab57d3398bf23d1d0fdbde2dab6231fe79ce5d9f8e2e22cbf55e8e2f2"
+        },
+        {
+          "file": "000001.tar",
+          "size_bytes": 2286899200,
+          "sha256": "ba26554f7b3571235515d886865bbb7754017f6b4b77797f3484eb12a10961fa"
+        },
+        {
+          "file": "000002.tar",
+          "size_bytes": 2290237440,
+          "sha256": "98d6a67e7adfafd6a94cbfd4a5c0fb67356bd960c24021bece8fb764845236a5"
+        },
+        {
+          "file": "000003.tar",
+          "size_bytes": 2283735040,
+          "sha256": "5cb31dd99fc32ab762c418fe489ccb2b61c54f7bae6d599f09bb0ad3e838fc32"
+        }
+      ],
+      "prompt_source_fields": [
+        "caption_florence-2-large",
+        "caption_internvl-3-8b",
+        "caption_sharegpt4v-7b",
+        "caption_gemini-2.5-flash-lite",
+        "caption_gemini_2_5_flash_lite"
+      ],
+      "prompt_source_mode": "random"
+    }
+  ],
+  "validation_data_sources": [
+    {
+      "name": "unsplash-lite-gemma-captions-validation",
+      "path": "/mnt/e/data/unsplash-lite-gemma-captions/artifacts/residual_p1_split/validation.parquet",
+      "prompt_source_fields": [
+        "training_caption",
+        "caption_detailed",
+        "caption_long",
+        "long_caption",
+        "prompt",
+        "caption",
+        "text"
+      ],
+      "prompt_source_mode": "first"
+    }
+  ],
+  "run_mode": "full_train",
+  "context_tokens": 248,
+  "fail_on_prompt_truncation": false,
+  "mixed_precision": "bf16",
+  "train_batch_size": 4,
+  "gradient_accumulation_steps": 2,
+  "max_samples": 51460,
+  "epochs": 1,
+  "max_opt_steps": 6435,
+  "sara_lr": 1e-05,
+  "lr_warmup_steps": 100,
+  "lr_decay_steps": 6435,
+  "sara_selection_mode": "target_fraction",
+  "sara_target_fraction": 0.15,
+  "sara_min_sparse_fraction": 0.01,
+  "sara_max_sparse_fraction_warn": 0.2,
+  "sara_max_sparse_fraction_abort": 0.25,
+  "caption_mix_short": 0.25,
+  "caption_mix_medium": 0.25,
+  "caption_mix_long": 0.5,
+  "validation_every_opt_steps": 250,
+  "validation_max_samples": 64,
+  "require_validation_gate": true,
+  "validation_max_relative_regression": 0.02,
+  "require_short_prompt_regression_gate": false,
+  "short_prompt_max_relative_rms": 0.05,
+  "run_final_visual_check": true,
+  "wandb_enabled": false,
+  "generation_grid_every_opt_steps": 1000,
+  "initial_sara_patch": "",
+  "prompt_source_fields": [
+    "training_caption",
+    "caption_detailed",
+    "caption_long",
+    "long_caption",
+    "prompt",
+    "caption",
+    "text"
+  ],
+  "prompt_source_mode": "first",
+  "validation_prompt_source_fields": [
+    "training_caption",
+    "caption_detailed",
+    "caption_long",
+    "long_caption",
+    "prompt",
+    "caption",
+    "text"
+  ],
+  "validation_prompt_source_mode": "first",
+  "wandb_run_name": "longclip-resolution-p4b-rope-monet4-full-stylejourney",
+  "drop_last_bucket_batches": false,
+  "resolution_conditioning_enabled": true,
+  "p4_enabled": true,
+  "p4_variant": "rope",
+  "p4_insertions": [
+    "pre_mid"
+  ],
+  "p4_hidden_dim": 1280,
+  "p4_heads": 8,
+  "p4_ff_mult": 2.0,
+  "p4_rope_base": 10000.0,
+  "p4_timestep_adaln": true,
+  "p4_smoke_identity_check": true,
+  "resolution_conditioning_hidden_dim": 256,
+  "resolution_conditioning_dropout_prob": 0.0,
+  "sidecar_lr": 1e-05,
+  "short_prompt_validation_every_opt_steps": 1000,
+  "generation_grid_mode": "complex",
+  "periodic_checkpoint_every_opt_steps": 1000,
+  "complex_generation_cases": [
+    {
+      "name": "warrior_princess",
+      "prompt": "poster of warrior princess| standing on hill | centered| key visual| intricate| highly detailed| breathtaking| precise lineart| vibrant| panoramic| cinematic| Carne Griffiths| Conrad Roset",
+      "negative_prompt": "(bonnet), (hat), (beanie), cap, (((wide shot))), (cropped head), bad framing, out of frame, deformed, cripple, old, fat, ugly, poor, missing arm, additional arms, additional legs, additional head, additional face, multiple people, group of people, dyed hair, black and white, grayscale",
+      "sampler": "dpmpp_sde_karras",
+      "steps": 30,
+      "guidance": 7.0,
+      "seed": 4267154965,
+      "width": 768,
+      "height": 960
+    },
+    {
+      "name": "medieval_darth_vader_dragon",
+      "prompt": "photo of medieval darth vader on red dragon, epic fight scene, holding glowing red flaming sword, full body, hyper realistic, intricate, apocalyptic",
+      "negative_prompt": "dark",
+      "sampler": "euler_a",
+      "steps": 20,
+      "guidance": 7.0,
+      "seed": 744448957,
+      "width": 768,
+      "height": 960
+    },
+    {
+      "name": "goddess_of_death",
+      "prompt": "Goddess, Goddess of Death, detailing, facial detailing, ultra quality, cinematic lighting, perfect and beautiful face, perfect composition, realistic, circuit board, fantasy, illustration, artstation, trial dark fantasy, photorealistic concept art, intense shadows, intense lighting :: 8k resolution, ultra-detailed quality 3D octane render, sharp focus, wallpaper, HDR, high quality, high-definition stylize 500",
+      "negative_prompt": "(deformed mouth), (deformed lips), (deformed eyes), (cross-eyed), (deformed iris), (deformed hands), lowers, 3d render, cartoon, long body, wide hips, narrow waist, disfigured, ugly, cross eyed, squinting, grain, Deformed, blurry, bad anatomy, poorly drawn face, mutation, mutated, extra limb, ugly, (poorly drawn hands), missing limb, floating limbs, disconnected limbs, malformed hands, blur, out of focus, long neck, disgusting, poorly drawn, mutilated, mangled, old, surreal, ((text)), jewelery, earrings",
+      "sampler": "dpmpp_sde_karras",
+      "steps": 30,
+      "guidance": 7.0,
+      "seed": 1826311933,
+      "width": 768,
+      "height": 960
+    },
+    {
+      "name": "milkyway",
+      "prompt": "milkyway",
+      "negative_prompt": "dark",
+      "sampler": "dpmpp_sde_karras",
+      "steps": 30,
+      "guidance": 7.0,
+      "seed": 1826311933,
+      "width": 768,
+      "height": 960
+    }
+  ]
+}

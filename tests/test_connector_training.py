@@ -100,6 +100,7 @@ from scripts.train_longclip_sara import (
     longclip_optimizer_parameter_groups,
     masked_per_sample_mse as longclip_masked_per_sample_mse,
     relative_prediction_rms,
+    save_periodic_weight_snapshot,
     validation_skip_reason,
 )
 
@@ -294,6 +295,77 @@ class ConnectorTrainingTests(unittest.TestCase):
                 output_dir="output", data_sources=["train.parquet"],
                 short_prompt_validation_every_opt_steps=-1,
             )
+        with self.assertRaisesRegex(ValueError, "generation_grid_mode"):
+            LongClipSaraConfig(
+                sd_checkpoint="stylejourney.safetensors",
+                longclip_repo="repo", longclip_checkpoint="model.pt",
+                output_dir="output", data_sources=["train.parquet"],
+                generation_grid_mode="unknown",  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(ValueError, "periodic_checkpoint_every_opt_steps"):
+            LongClipSaraConfig(
+                sd_checkpoint="stylejourney.safetensors",
+                longclip_repo="repo", longclip_checkpoint="model.pt",
+                output_dir="output", data_sources=["train.parquet"],
+                periodic_checkpoint_every_opt_steps=-1,
+            )
+
+    def test_longclip_periodic_snapshot_is_atomic_and_reloadable(self):
+        class FakeUNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.class_embedding = nn.Linear(2, 3)
+
+        class FakeConfig:
+            resolution_conditioning_enabled = True
+            p4_enabled = True
+
+            def __init__(self, output_dir):
+                self.output_dir = output_dir
+
+            def to_dict(self):
+                return {"output_dir": self.output_dir, "initial_sara_patch": ""}
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = SimpleNamespace(unet=FakeUNet())
+            encoder = SimpleNamespace(truncated_prompt_count=7)
+            cfg = FakeConfig(directory)
+            sparse = {
+                "attn2.to_k.weight": {
+                    "mask": torch.tensor([True]),
+                    "values": torch.tensor([0.25]),
+                    "shape": (1,),
+                }
+            }
+            with (
+                patch("scripts.train_longclip_sara.longclip_sara_schema",
+                      return_value={"schema_version": 1}),
+                patch("scripts.train_longclip_sara.collect_sara_sparse_values",
+                      return_value=sparse),
+                patch("scripts.train_longclip_sara.p4_state_dict",
+                      return_value={"pre_mid.gate": torch.tensor(0.1)}),
+                patch("scripts.train_longclip_sara.sara_selected_delta_metrics",
+                      return_value={"selected_delta_l2": 0.5}),
+                patch("scripts.train_longclip_sara.p4_telemetry",
+                      return_value={"p4/gate": 0.1}),
+            ):
+                path = save_periodic_weight_snapshot(
+                    state, cfg, encoder, opt_step=1000,
+                    sidecar_summary={"p4": True},
+                    initial_sidecar_loaded=None,
+                    sidecar_smoke={"passed": True},
+                    sara_summary={"selected": 1},
+                    sara_baseline={"unused": torch.tensor(0.0)},
+                )
+            self.assertTrue(path.is_file())
+            self.assertFalse(path.with_suffix(path.suffix + ".tmp").exists())
+            checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+            self.assertEqual(checkpoint["completion"]["optimizer_steps"], 1000)
+            self.assertTrue(checkpoint["completion"]["periodic_snapshot"])
+            self.assertFalse(checkpoint["completion"]["completed"])
+            self.assertEqual(checkpoint["sparse_values"], sparse)
+            self.assertIn("resolution_conditioner_state_dict", checkpoint)
+            self.assertIn("p4_state_dict", checkpoint)
 
     def test_longclip_optimizer_separates_sparse_and_sidecar_lrs(self):
         class FakeUNet(nn.Module):
